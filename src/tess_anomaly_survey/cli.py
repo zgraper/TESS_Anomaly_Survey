@@ -310,9 +310,8 @@ def do_export(args):
 
 
 def do_review(args):
-    cx=db.connect(args.db)
-    db.record_review(cx, args.candidate_id, args.status, args.note)
-    cx.close()
+    from .web import SurveyDatabaseAdapter
+    SurveyDatabaseAdapter(args.db).record_event_review(args.candidate_id, args.status, args.note)
     print(f'Candidate {args.candidate_id} review updated to {args.status}')
 
 

@@ -90,7 +90,10 @@ def test_full_pipeline(tmp_path):
     assert out.read_text().startswith('id,run_id,tic')
     cid=int(list(csv.DictReader(out.open()))[0]['id'])
     main(['review','--db',str(db),'--candidate-id',str(cid),'--status','interesting','--note','Test'])
-    assert sqlite3.connect(db).execute('SELECT review_status FROM candidates WHERE id=?',(cid,)).fetchone()[0]=='interesting'
+    assert sqlite3.connect(db).execute('SELECT review_status FROM candidates WHERE id=?',(cid,)).fetchone()[0]=='unreviewed'
+    from tess_anomaly_survey.web import SurveyDatabaseAdapter
+    overlay = SurveyDatabaseAdapter(db).review_db_path
+    assert sqlite3.connect(overlay).execute('SELECT status FROM candidate_review_overlay WHERE candidate_id=?',(cid,)).fetchone()[0]=='interesting'
     with pytest.raises(SystemExit,match='data leak'):
         main(['validate','--root',str(root),'--catalog',str(calib),
               '--calibration',str(artifact),'--output',str(tmp_path/'bad.json')])

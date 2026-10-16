@@ -85,74 +85,45 @@ def resolve_light_curve_series(
     4. On-demand streaming download from NASA MAST archive
     """
     clean_tic = sanitize_tic(tic)
-    sec_key = int(sector) if sector is not None and sector > 0 else 0
-    cache_key = (clean_tic, sec_key)
-
+    local = None
+    if source_file:
+        proposed = (Path(root_path) / source_file) if root_path else Path(source_file)
+        if proposed.is_file():
+            local = proposed.resolve()
+    fingerprint = (str(local), local.stat().st_size, local.stat().st_mtime_ns) if local else None
+    cache_key = (clean_tic, sector, source_file, product_filename, data_uri, fingerprint)
     with _CACHE_LOCK:
-        if cache_key in _LIGHT_CURVE_CACHE:
-            cached = _LIGHT_CURVE_CACHE[cache_key]
+        cached = _LIGHT_CURVE_CACHE.get(cache_key)
+        if cached:
             return cached['time'], cached['flux_ppm'], cached['good'], cached['cadence'], cached['source']
-
+    if local:
+        if local.name.lower().endswith(('.fits', '.fit', '.fits.gz')):
+            streaming.validate_fits_identity(local, clean_tic, sector)
+        t, f, good, cad = _load_local_light_curve(local)
+        return _cache_and_return(cache_key, t, f, good, cad, f"local:{local.name}")
+    # Missing synthetic/local data must never be replaced with real observations.
+    if source_file and str(source_file).lower().endswith('.npz'):
+        raise FileNotFoundError("Synthetic/local NPZ source unavailable; no archive substitution is permitted.")
+    if not product_filename and data_uri:
+        product_filename = data_uri.rsplit('/', 1)[-1]
+    if not product_filename:
+        raise FileNotFoundError("Exact archive product identity is unavailable.")
+    if Path(product_filename).name != product_filename or '/' in product_filename or '\\' in product_filename:
+        raise ValueError("Invalid archive product filename.")
+    expected_uri = f"mast:TESS/product/{product_filename}"
+    if data_uri and data_uri != expected_uri:
+        raise ValueError("Archive URI and product filename disagree.")
     cache_path = Path(cache_dir) if cache_dir else get_default_cache_dir()
     cache_path.mkdir(parents=True, exist_ok=True)
-
-    # 1. Check local root directory if provided
-    if root_path and source_file:
-        full_root_path = (Path(root_path) / source_file).resolve()
-        try:
-            resolved_root = Path(root_path).resolve()
-            if full_root_path.is_relative_to(resolved_root) and full_root_path.is_file():
-                t, f, good, cad = _load_local_light_curve(full_root_path)
-                return _cache_and_return(cache_key, t, f, good, cad, f"local:{full_root_path.name}")
-        except (ValueError, PermissionError):
-            pass
-
-    # 2. Check direct source_file if absolute or relative file exists
-    if source_file and Path(source_file).is_file():
-        t, f, good, cad = _load_local_light_curve(Path(source_file))
-        return _cache_and_return(cache_key, t, f, good, cad, f"local:{Path(source_file).name}")
-
-    # 3. Check local cache directory for matching FITS files
-    candidate_cache_names = []
-    if product_filename:
-        candidate_cache_names.append(product_filename)
-    if source_file:
-        candidate_cache_names.append(source_file)
-        clean_sf = re.sub(r"^w\d+_", "", source_file)
-        if clean_sf != source_file:
-            candidate_cache_names.append(clean_sf)
-    if sec_key > 0:
-        candidate_cache_names.append(f"tess_tic{clean_tic}_s{sec_key:04d}_lc.fits")
-        candidate_cache_names.append(f"tic_{clean_tic}_sec{sec_key}.fits")
-    candidate_cache_names.append(f"tic_{clean_tic}.fits")
-
-    for cname in candidate_cache_names:
-        cp = cache_path / cname
-        if cp.is_file() and cp.stat().st_size > 10000:
-            try:
-                t, f, good, cad = _load_local_light_curve(cp)
-                return _cache_and_return(cache_key, t, f, good, cad, f"cache:{cp.name}")
-            except Exception:
-                pass
-
-    # 4. On-demand retrieval from NASA MAST archive
-    if allow_download:
-        try:
-            spoc_meta = streaming.resolve_mast_product(clean_tic, sector=sec_key if sec_key > 0 else None)
-            target_filename = spoc_meta["product_filename"]
-            download_url = spoc_meta["download_url"]
-            dest_file = cache_path / target_filename
-
-            if not dest_file.is_file() or dest_file.stat().st_size < 10000:
-                streaming.download_light_curve(download_url, str(dest_file), timeout=35.0, max_retries=2)
-
-            t, f, good, cad = _load_local_light_curve(dest_file)
-            return _cache_and_return(cache_key, t, f, good, cad, f"mast:{dest_file.name}")
-        except Exception as e:
-            # Re-raise with clean context
-            raise FileNotFoundError(f"Could not resolve light curve for TIC {clean_tic} (sector={sector}): {e}") from e
-
-    raise FileNotFoundError(f"Light curve for TIC {clean_tic} not found locally and download not requested.")
+    dest = cache_path / product_filename
+    if not dest.is_file():
+        if not allow_download:
+            raise FileNotFoundError("Recorded archive product is not cached.")
+        url = "https://mast.stsci.edu/api/v0.1/Download/file?uri=" + urllib.parse.quote(expected_uri, safe='')
+        streaming.download_light_curve(url, str(dest), timeout=35.0, max_retries=2)
+    streaming.validate_fits_identity(dest, clean_tic, sector)
+    t, f, good, cad = _load_local_light_curve(dest)
+    return _cache_and_return(cache_key, t, f, good, cad, f"mast:{product_filename}")
 
 
 def _load_local_light_curve(path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
@@ -194,19 +165,39 @@ def _cache_and_return(key: Tuple[str, int], t: np.ndarray, f_ppm: np.ndarray, go
 class SurveyDatabaseAdapter:
     """Unified adapter wrapping legacy, streaming, and overlay review databases."""
 
-    def __init__(self, db_path: str, review_db_path: Optional[str] = None, read_only: bool = False):
-        self.db_path = str(Path(db_path).resolve()) if db_path != ":memory:" else ":memory:"
+    def __init__(self, db_path: str, review_db_path: Optional[str] = None,
+                 read_only: bool = False, run_id: Optional[str] = None):
+        self.db_path = str(Path(db_path).resolve())
         self.read_only = read_only
-        self.review_db_path = str(Path(review_db_path).resolve()) if review_db_path else None
-
-        # Determine if overlay review database is required
-        if self.read_only and not self.review_db_path and self.db_path != ":memory:":
-            self.review_db_path = str(Path(self.db_path).with_name(f"{Path(self.db_path).stem}.reviews.sqlite"))
-
-        if self.review_db_path:
-            self._init_overlay_db(self.review_db_path)
-
-        # Inspect schema
+        with sqlite3.connect(Path(self.db_path).as_uri() + "?mode=ro", uri=True) as cx:
+            tables = {r[0] for r in cx.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            ids = set()
+            for table in ('runs', 'candidates', 'observations'):
+                if table in tables:
+                    cols = {r[1] for r in cx.execute(f"PRAGMA table_info({table})")}
+                    key = 'run_id' if 'run_id' in cols else ('id' if table == 'runs' else None)
+                    if key:
+                        ids.update(str(r[0]) for r in cx.execute(f"SELECT DISTINCT {key} FROM {table}") if r[0] is not None)
+        if run_id is None and len(ids) > 1:
+            raise ValueError("Multiple source runs: select an explicit run_id.")
+        if run_id is not None and ids and str(run_id) not in ids:
+            raise ValueError("Requested run is absent from the source database.")
+        self.run_id = str(run_id) if run_id is not None else next(iter(ids), None)
+        self._multiple_runs = len(ids) > 1
+        suffix = hashlib.sha256((self.run_id or 'legacy').encode()).hexdigest()[:16]
+        self.review_db_path = str(Path(review_db_path).resolve()) if review_db_path else str(
+            Path(self.db_path).with_suffix(f".{suffix}.reviews.sqlite"))
+        if self.review_db_path == self.db_path:
+            raise ValueError("Review overlay must be separate from scientific results.")
+        self._init_overlay_db(self.review_db_path)
+        with sqlite3.connect(self.review_db_path) as cx:
+            cx.execute("CREATE TABLE IF NOT EXISTS source_binding (source_path TEXT, run_id TEXT)")
+            binding = (self.db_path, self.run_id or 'legacy')
+            row = cx.execute("SELECT source_path, run_id FROM source_binding").fetchone()
+            if row and tuple(row) != binding:
+                raise ValueError("Review overlay belongs to another source or run.")
+            if not row:
+                cx.execute("INSERT INTO source_binding VALUES (?,?)", binding)
         cx = self.get_connection()
         try:
             self.schema_info = self._inspect_schema(cx)
@@ -256,44 +247,21 @@ class SurveyDatabaseAdapter:
         con.close()
 
     def get_connection(self) -> sqlite3.Connection:
-        if self.read_only and self.db_path != ":memory:":
-            uri = f"file:{urllib.request.pathname2url(self.db_path)}?mode=ro"
-            cx = sqlite3.connect(uri, uri=True, timeout=30.0)
-        else:
-            cx = sqlite3.connect(self.db_path, timeout=30.0)
-            if not self.read_only:
-                # Ensure essential review tables exist if writable
-                with cx:
-                    cx.execute('''CREATE TABLE IF NOT EXISTS star_reviews (
-                        tic TEXT PRIMARY KEY,
-                        status TEXT NOT NULL DEFAULT 'unreviewed',
-                        star_class TEXT NOT NULL DEFAULT '',
-                        note TEXT NOT NULL DEFAULT '',
-                        reviewer TEXT NOT NULL DEFAULT 'local_user',
-                        updated_utc TEXT NOT NULL
-                    )''')
-                    cx.execute('''CREATE TABLE IF NOT EXISTS star_review_history (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        tic TEXT NOT NULL,
-                        previous_status TEXT NOT NULL,
-                        new_status TEXT NOT NULL,
-                        note TEXT NOT NULL,
-                        reviewer TEXT NOT NULL DEFAULT 'local_user',
-                        created_utc TEXT NOT NULL
-                    )''')
-                    cx.execute('''CREATE TABLE IF NOT EXISTS review_history (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        candidate_id INTEGER NOT NULL,
-                        previous_status TEXT NOT NULL,
-                        new_status TEXT NOT NULL,
-                        note TEXT NOT NULL,
-                        reviewer TEXT NOT NULL DEFAULT 'local_user',
-                        created_utc TEXT NOT NULL
-                    )''')
-
-        # If an overlay review db is used, attach it
-        if self.review_db_path and os.path.isfile(self.review_db_path):
-            cx.execute(f"ATTACH DATABASE '{self.review_db_path}' AS overlay")
+        # The source is never opened writable, including when annotations are enabled.
+        cx = sqlite3.connect(Path(self.db_path).as_uri() + "?mode=ro", uri=True, timeout=30.0)
+        cx.create_function("selected_run", 0, lambda: self.run_id)
+        tables = {r[0] for r in cx.execute("SELECT name FROM main.sqlite_master WHERE type='table'")}
+        for table in ('candidates', 'observations', 'candidate_systems', 'candidate_detections',
+                      'processed_files', 'performance_benchmarks'):
+            if table in tables:
+                cols = {r[1] for r in cx.execute(f"PRAGMA main.table_info({table})")}
+                if 'run_id' in cols and self.run_id is not None:
+                    cx.execute(f"CREATE TEMP VIEW {table} AS SELECT * FROM main.{table} WHERE CAST(run_id AS TEXT)=selected_run()")
+        if 'star_reviews' not in tables or self._multiple_runs:
+            cx.execute("CREATE TEMP VIEW star_reviews AS SELECT NULL AS tic, NULL AS status, NULL AS star_class, NULL AS note WHERE 0")
+        if 'star_review_history' not in tables or self._multiple_runs:
+            cx.execute("CREATE TEMP VIEW star_review_history AS SELECT NULL AS id, NULL AS tic, NULL AS previous_status, NULL AS new_status, NULL AS note, NULL AS reviewer, NULL AS created_utc WHERE 0")
+        cx.execute("ATTACH DATABASE ? AS overlay", (self.review_db_path,))
         return cx
 
     def _inspect_schema(self, cx: sqlite3.Connection) -> Dict[str, Any]:
@@ -423,21 +391,21 @@ class SurveyDatabaseAdapter:
             ov_cand_join = "LEFT JOIN overlay.candidate_review_overlay o_rev ON c.id = o_rev.candidate_id" if self.review_db_path else ""
             ov_star_join = "LEFT JOIN overlay.star_reviews sr_ov ON c.tic = sr_ov.tic" if self.review_db_path else ""
 
-            verif_col = "c.scientific_classification" if self.schema_info['has_scientific_classification'] else "'verified_localized_dimming'"
+            verif_col = "c.scientific_classification" if self.schema_info['has_scientific_classification'] else "'not_run'"
 
             if self.schema_info['has_candidate_systems']:
                 sys_cols = """
-                    COALESCE(s.period_days, s2.period_days) as period_days,
-                    COALESCE(s.is_periodic, s2.is_periodic) as is_periodic,
-                    COALESCE(s.classification, s2.classification) as system_classification,
-                    COALESCE(s.epoch_btjd, s2.epoch_btjd) as epoch_btjd,
-                    COALESCE(s.odd_even_sigma, s2.odd_even_sigma) as odd_even_sigma,
-                    COALESCE(s.period_uncertainty_days, s2.period_uncertainty_days) as period_uncertainty_days,
-                    COALESCE(s.alternate_period_days, s2.alternate_period_days) as alternate_period_days
+                    s.period_days as period_days,
+                    s.is_periodic as is_periodic,
+                    s.classification as system_classification,
+                    s.epoch_btjd as epoch_btjd,
+                    s.odd_even_sigma as odd_even_sigma,
+                    s.period_uncertainty_days as period_uncertainty_days,
+                    s.alternate_period_days as alternate_period_days
                 """
                 sys_joins = """
                     LEFT JOIN candidate_systems s ON c.system_id = s.id
-                    LEFT JOIN candidate_systems s2 ON c.tic = s2.tic
+
                 """
             else:
                 sys_cols = """
@@ -493,8 +461,8 @@ class SurveyDatabaseAdapter:
                         'odd_even_sigma': oe_sig or 0.0,
                         'period_uncertainty_days': p_err,
                         'alternate_period_days': alt_p,
-                        'primary_verification': verif or 'verified_localized_dimming',
-                        'coincidence_risk': 'none',  # Will refine if systematic
+                        'primary_verification': verif or 'not_run',
+                        'coincidence_risk': 'unknown',  # Will refine if systematic
                         'has_dimming': False
                     }
 
@@ -633,7 +601,7 @@ class SurveyDatabaseAdapter:
             ov_cand_join = "LEFT JOIN overlay.candidate_review_overlay o_rev ON c.id = o_rev.candidate_id" if self.review_db_path else ""
             ov_star_join = "LEFT JOIN overlay.star_reviews sr_ov ON c.tic = sr_ov.tic" if self.review_db_path else ""
 
-            verif_col = "c.scientific_classification" if self.schema_info['has_scientific_classification'] else "'verified_localized_dimming'"
+            verif_col = "c.scientific_classification" if self.schema_info['has_scientific_classification'] else "'not_run'"
 
             if self.schema_info['has_candidate_systems']:
                 sys_cols = """
@@ -641,7 +609,7 @@ class SurveyDatabaseAdapter:
                     s.epoch_btjd, s.odd_even_sigma, s.period_uncertainty_days, s.epoch_uncertainty_days,
                     s.alternate_period_days
                 """
-                sys_joins = "LEFT JOIN candidate_systems s ON (c.tic = s.tic)"
+                sys_joins = "LEFT JOIN candidate_systems s ON c.system_id = s.id"
             else:
                 sys_cols = """
                     NULL as period_days, 0 as is_periodic, '' as system_classification,
@@ -654,10 +622,10 @@ class SurveyDatabaseAdapter:
             extra_cols = [
                 "c.scientific_description" if 'scientific_description' in cand_cols else "'' as scientific_description",
                 "c.true_depth_min_pct" if 'true_depth_min_pct' in cand_cols else "NULL as true_depth_min_pct",
-                "c.has_shoulder_flare" if 'has_shoulder_flare' in cand_cols else "0 as has_shoulder_flare",
+                "c.has_shoulder_flare" if 'has_shoulder_flare' in cand_cols else "NULL as has_shoulder_flare",
                 "c.shoulder_elevation_pct" if 'shoulder_elevation_pct' in cand_cols else "0.0 as shoulder_elevation_pct",
                 "c.consecutive_depressed" if 'consecutive_depressed' in cand_cols else "0 as consecutive_depressed",
-                "c.coincidence_risk_level" if 'coincidence_risk_level' in cand_cols else ("c.coincidence_star_count" if 'coincidence_star_count' in cand_cols else "'none' as coincidence_risk_level")
+                "c.coincidence_risk_level" if 'coincidence_risk_level' in cand_cols else ("c.coincidence_star_count" if 'coincidence_star_count' in cand_cols else "'unknown' as coincidence_risk_level")
             ]
             extra_cols_sql = ", ".join(extra_cols)
 
@@ -790,11 +758,18 @@ class SurveyDatabaseAdapter:
                     'scientific_classification': r[12],
                     'scientific_description': r[24] if len(r) > 24 and r[24] is not None else '',
                     'true_depth_min_pct': round(float(r[25]), 3) if len(r) > 25 and r[25] is not None else None,
-                    'has_shoulder_flare': bool(r[26]) if len(r) > 26 and r[26] is not None else False,
+                    'has_shoulder_flare': bool(r[26]) if len(r) > 26 and r[26] is not None else None,
                     'shoulder_elevation_pct': round(float(r[27]), 2) if len(r) > 27 and r[27] is not None else 0.0,
                     'consecutive_depressed': r[28] if len(r) > 28 and r[28] is not None else 0,
-                    'coincidence_risk_level': str(r[29]) if len(r) > 29 and r[29] is not None else 'none'
+                    'coincidence_risk_level': str(r[29]) if len(r) > 29 and r[29] is not None else 'unknown'
                 })
+
+            if self.schema_info['has_observations'] and 'observation_id' in self.schema_info['candidates_cols']:
+                for event in events:
+                    cursor = cx.execute("SELECT o.* FROM observations o JOIN candidates c ON c.observation_id=o.id AND c.run_id=o.run_id WHERE c.id=?", (event['id'],))
+                    observation = cursor.fetchone()
+                    event['observation'] = dict(zip([col[0] for col in cursor.description], observation)) if observation else None
+                obs_meta = events[0].get('observation') or {}
 
             # Star history
             hist_table = "overlay.star_review_history" if self.review_db_path else "star_review_history"
@@ -860,6 +835,8 @@ class SurveyDatabaseAdapter:
         cx = self.get_connection()
         try:
             with cx:
+                if not cx.execute("SELECT 1 FROM candidates WHERE id=?", (candidate_id,)).fetchone():
+                    raise ValueError("Candidate is not part of the selected run.")
                 if self.review_db_path:
                     # Write to overlay tables
                     row = cx.execute("SELECT status FROM overlay.candidate_review_overlay WHERE candidate_id=?", (candidate_id,)).fetchone()
@@ -956,7 +933,7 @@ class SurveyDatabaseAdapter:
 # ---------------------------------------------------------------------------
 
 def render_plot_png(source_file, center_btjd, width_hr, score, depth_ppm, tic,
-                    root_path=None, cache_dir=None, mode="zoom", hours=12.0, other_centers=None):
+                    root_path=None, cache_dir=None, mode="zoom", hours=12.0, other_centers=None, sector=None, product_filename=None, data_uri=None):
     """Generate in-memory static PNG plot with on-demand fallback support."""
     import matplotlib
     matplotlib.use('Agg')
@@ -966,7 +943,7 @@ def render_plot_png(source_file, center_btjd, width_hr, score, depth_ppm, tic,
 
     try:
         t, f_ppm, good, cadence, src_label = resolve_light_curve_series(
-            tic=tic, source_file=source_file, root_path=root_path, cache_dir=cache_dir, allow_download=True
+            tic=tic, sector=sector, product_filename=product_filename, data_uri=data_uri, source_file=source_file, root_path=root_path, cache_dir=cache_dir, allow_download=True
         )
     except Exception as e:
         ax.text(0.5, 0.5, f"Light Curve Data Unavailable:\n{str(e)}\n\n(Pass --root <path> or check internet access for MAST streaming)",
@@ -1025,7 +1002,7 @@ def render_plot_png(source_file, center_btjd, width_hr, score, depth_ppm, tic,
 def render_phase_plot_png(source_file, center_btjd, width_hr, score, depth_ppm, tic,
                           epoch_btjd, period_days, is_periodic, odd_even_sigma,
                           period_err=None, epoch_err=None, is_alt=False,
-                          root_path=None, cache_dir=None):
+                          root_path=None, cache_dir=None, sector=None, product_filename=None, data_uri=None):
     """Generate in-memory phase-folded static PNG plot."""
     import matplotlib
     matplotlib.use('Agg')
@@ -1045,7 +1022,7 @@ def render_phase_plot_png(source_file, center_btjd, width_hr, score, depth_ppm, 
 
     try:
         t, f_ppm, good, cadence, src_label = resolve_light_curve_series(
-            tic=tic, source_file=source_file, root_path=root_path, cache_dir=cache_dir, allow_download=True
+            tic=tic, sector=sector, product_filename=product_filename, data_uri=data_uri, source_file=source_file, root_path=root_path, cache_dir=cache_dir, allow_download=True
         )
     except Exception as e:
         ax.text(0.5, 0.5, f"Light Curve Data Unavailable:\n{str(e)}",
@@ -1145,12 +1122,12 @@ class AnomalyReviewHandler(BaseHTTPRequestHandler):
                         con.close()
                     rev_path = str(Path(run["review_db_path"]).resolve()) if run.get("review_db_path") else None
                     is_ro = bool(exp and exp.get("is_read_only", 0) == 1)
-                    key = (out_path, rev_path, is_ro)
+                    key = (out_path, rev_path, is_ro, run.get("source_run_id"))
                     if not hasattr(self.server, "adapters_cache"):
                         self.server.adapters_cache = {}
                     if key not in self.server.adapters_cache:
                         self.server.adapters_cache[key] = SurveyDatabaseAdapter(
-                            out_path, review_db_path=rev_path, read_only=is_ro
+                            out_path, review_db_path=rev_path, read_only=is_ro, run_id=run.get("source_run_id")
                         )
                     ad = self.server.adapters_cache[key]
                     if exp and exp.get("targets"):
@@ -1326,14 +1303,26 @@ class AnomalyReviewHandler(BaseHTTPRequestHandler):
                 self.send_json({'error': 'Star not found'}, HTTPStatus.NOT_FOUND)
                 return
 
-            sec_param = query.get('sector', [None])[0]
-            sector = int(sec_param) if sec_param else (detail['events'][0]['sector'] if detail['events'] else None)
-            source_file = detail['events'][0]['source_file'] if detail['events'] else None
-            obs_prod = detail.get('observation', {}).get('product_filename') if detail.get('observation') else None
+            selected = detail['events']
+            event_id = query.get('candidate_id', [None])[0]
+            sector_query = query.get('sector', [None])[0]
+            if event_id:
+                selected = [e for e in selected if str(e['id']) == event_id]
+            elif sector_query:
+                selected = [e for e in selected if str(e['sector']) == sector_query]
+            event = selected[0] if selected else None
+            if (event_id or sector_query) and not event:
+                self.send_json({'error': 'Candidate/product not in selected run'}, HTTPStatus.NOT_FOUND)
+                return
+            observation = (event.get('observation') if event else detail.get('observation')) or {}
+            sector = event['sector'] if event else observation.get('sector')
+            source_file = event['source_file'] if event else None
+            obs_prod = observation.get('product_filename')
+            detail['events'] = [e for e in selected if e.get('observation', {}).get('id') == observation.get('id')] if observation else selected[:1]
 
             try:
                 t, f_ppm, good, cadence, src_label = resolve_light_curve_series(
-                    tic=tic, sector=sector, source_file=source_file, product_filename=obs_prod,
+                    tic=tic, sector=sector, source_file=source_file, product_filename=obs_prod, data_uri=observation.get("data_uri"),
                     root_path=self.root_path, cache_dir=self.cache_dir, allow_download=True
                 )
 
@@ -1459,7 +1448,7 @@ class AnomalyReviewHandler(BaseHTTPRequestHandler):
                                                s.epoch_btjd, s.period_days, s.is_periodic, s.odd_even_sigma,
                                                s.period_uncertainty_days, s.epoch_uncertainty_days, s.alternate_period_days
                                         FROM candidates c
-                                        LEFT JOIN candidate_systems s ON c.tic = s.tic
+                                        LEFT JOIN candidate_systems s ON c.system_id = s.id
                                         WHERE c.id=?''', (cid,)).fetchone()
                     if not row:
                         self.send_json({'error': 'Candidate not found'}, HTTPStatus.NOT_FOUND)
@@ -1472,6 +1461,9 @@ class AnomalyReviewHandler(BaseHTTPRequestHandler):
                 finally:
                     cx.close()
 
+                event = next(e for e in self.adapter.get_star_details(tic)['events'] if e['id'] == cid)
+                observation = event.get('observation') or {}
+                identity = dict(sector=event['sector'], product_filename=observation.get('product_filename'), data_uri=observation.get('data_uri'))
                 if mode == "phase":
                     fold_period = period_days if period_days is not None else 0.0
                     is_alt = False
@@ -1487,11 +1479,11 @@ class AnomalyReviewHandler(BaseHTTPRequestHandler):
                                                 epoch_err=t0_err,
                                                 is_alt=is_alt,
                                                 root_path=self.root_path,
-                                                cache_dir=self.cache_dir)
+                                                cache_dir=self.cache_dir, **identity)
                 else:
                     png = render_plot_png(source_file, center_btjd, width_hr, score, depth_ppm, tic,
                                           root_path=self.root_path, cache_dir=self.cache_dir,
-                                          mode=mode, hours=hours, other_centers=other_centers)
+                                          mode=mode, hours=hours, other_centers=other_centers, **identity)
                 self.send_png(png)
                 return
 
@@ -3489,7 +3481,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
         document.getElementById('prov-kernel-info').innerText = `Matched ${ev.width_hr || 2.0}h box kernel (B1 Detector, T=73.78)`;
 
         // Tier 2: Automated Photometric Verification (5-State Machine)
-        const verifClass = ev.scientific_classification || 'verified_localized_dimming';
+        const verifClass = ev.scientific_classification || 'not_run';
         document.getElementById('prov-verif-class').innerText = verifClass.replace(/_/g, ' ').toUpperCase();
         document.getElementById('prov-verif-class').style.color = (verifClass === 'verified_localized_dimming') ? '#34d399' : (verifClass.includes('flare') ? '#fbbf24' : '#60a5fa');
         document.getElementById('prov-depth').innerText = `${(ev.depth_ppm / 10000).toFixed(3)}% (${ev.depth_ppm} ppm)`;
@@ -3499,7 +3491,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
           document.getElementById('prov-flare').innerText = `Elevated Shoulder${elev}`;
           document.getElementById('prov-flare').style.color = '#fbbf24';
         } else {
-          document.getElementById('prov-flare').innerText = 'None Detected';
+          document.getElementById('prov-flare').innerText = ev.has_shoulder_flare === false ? 'None Detected' : 'Not run / unavailable';
           document.getElementById('prov-flare').style.color = '#34d399';
         }
         document.getElementById('prov-verif-desc').innerText = ev.scientific_description || 
@@ -3508,7 +3500,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
             : 'Automated 5-state photometric verification classification.');
 
         // Tier 3: Spatial Coincidence Risk
-        const coincRisk = ev.coincidence_risk_level || star.coincidence_risk || 'none';
+        const coincRisk = ev.coincidence_risk_level || star.coincidence_risk || 'unknown';
         const coincElem = document.getElementById('prov-coincidence-level');
         const coincDesc = document.getElementById('prov-coincidence-desc');
         if (coincRisk === 'high' || (ev.coincidence_star_count && ev.coincidence_star_count > 1)) {
@@ -3516,9 +3508,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
           coincElem.style.color = '#ef4444';
           coincDesc.innerText = 'Multi-star simultaneous trigger detected across field. Potential instrumental systematic or scattered light.';
         } else {
-          coincElem.innerText = 'Level: NONE (Spatially Isolated)';
+          coincElem.innerText = coincRisk === 'none' ? 'Level: NONE' : 'Level: UNKNOWN / NOT RUN';
           coincElem.style.color = '#34d399';
-          coincDesc.innerText = 'No cross-star coincidence identified. Event is spatially isolated.';
+          coincDesc.innerText = coincRisk === 'none' ? 'Recorded coincidence analysis found no match.' : 'No coincidence analysis result is recorded.';
         }
 
         // Tier 4: Provisional Morphological Interpretation

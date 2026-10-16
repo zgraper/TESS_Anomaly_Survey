@@ -706,6 +706,21 @@ def process_observation(
     }
 
 
+def validate_fits_identity(path, tic, sector=None):
+    """Reject photometry inconsistent with the requested SPOC two-minute product."""
+    with fits.open(path, memmap=False) as hdul:
+        header = hdul[0].header
+        if str(header.get("TICID", "")).strip() != str(tic).replace("TIC:", "").strip():
+            raise ValueError("FITS TIC does not match requested target")
+        if sector is not None and int(header.get("SECTOR", -1)) != int(sector):
+            raise ValueError("FITS sector does not match requested observation")
+        times = np.asarray(hdul[1].data["TIME"], dtype=float)
+        delta = np.diff(times[np.isfinite(times)])
+        cadence = float(np.median(delta[delta > 0])) if np.any(delta > 0) else float('nan')
+        if not math.isfinite(cadence) or abs(cadence * 86400 - 120) > 1.2:
+            raise ValueError("FITS cadence is not the supported two-minute cadence")
+
+
 def _worker_process_task(
     item: Dict[str, Any],
     temp_cache: Path,
@@ -759,6 +774,7 @@ def _worker_process_task(
         dest_file = temp_cache / f"w{worker_id}_{filename}"
         n_bytes, dl_sec, sha256_hash = download_light_curve(download_url, str(dest_file), session=session)
 
+        validate_fits_identity(dest_file, tic, sec)
         # Process observation
         res = process_observation(str(dest_file), threshold_t=threshold_t, method=method)
 
@@ -823,6 +839,22 @@ def stream_pipeline(
     """Stream, process, and persist a cohort of TESS light curves with configurable parallelism."""
     core.frozen_check()
 
+    if method != "fixed_box_2h":
+        raise ValueError("Only the fixed two-hour detector is supported.")
+    if not math.isfinite(threshold_t) or threshold_t <= 0:
+        raise ValueError("Threshold must be finite and positive.")
+    effective_config = {
+        "length": 512, "stride": 256, "min_good": 0.97,
+        "threshold_t": threshold_t, "method": method,
+        "quality_mask": TESS_DEFAULT_QUALITY_MASK,
+        "b0_hash": core.ORIGINAL_B0_SHA256, "b1_hash": core.ORIGINAL_B1_SHA256,
+        "post_detection_method": "legacy_v1",
+    }
+    config_json = json.dumps(effective_config, sort_keys=True, separators=(",", ":"))
+    # This execution fingerprint covers post-processing too; retain the historical
+    # calibration hash separately instead of falsely equating the two contracts.
+    config_hash = hashlib.sha256(config_json.encode()).hexdigest()
+
     dev_tics = set()
     if check_dev_universe:
         dev_tics = load_development_universe(dev_universe_manifest)
@@ -834,14 +866,20 @@ def stream_pipeline(
     con = init_streaming_db(db_path)
     cur = con.cursor()
 
+    existing = cur.execute("SELECT settings_json FROM runs WHERE run_id=?", (run_id,)).fetchone()
+    if existing:
+        if not resume or json.loads(existing[0] or "{}") != effective_config:
+            con.close()
+            raise ValueError("Existing run configuration differs or lacks exact provenance; create a new run.")
+
     # Record run entry
     with con:
         con.execute("""
         INSERT OR IGNORE INTO runs (run_id, created_utc, software_version, b0_hash, b1_hash, threshold_t, method, config_hash, worker_count, settings_json, notes)
         VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
         (run_id, utc_now(), __version__, core.ORIGINAL_B0_SHA256, core.ORIGINAL_B1_SHA256,
-         threshold_t, method, FROZEN_CONFIG_HASH if threshold_t == FROZEN_THRESHOLD_T else "experimental_config", max_workers,
-         json.dumps({"length": 512, "stride": 256, "min_good": 0.97, "max_workers": max_workers, "threshold_t": threshold_t, "method": method}),
+         threshold_t, method, config_hash, max_workers,
+         config_json,
          notes or "Streaming survey run"))
 
     temp_cache = Path(temp_dir) if temp_dir else Path(tempfile.mkdtemp(prefix="tess_stream_cache_"))
@@ -946,7 +984,7 @@ def stream_pipeline(
                             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                             (run_id, tic_tag, sec, res["camera"], res["ccd"], res["tmag"], res["teff"],
                              out["obs_id"], out["product_filename"], out["data_uri"], out["source_url"],
-                             out["file_sha256"], out["calib_level"], out["prvversion"], FROZEN_CONFIG_HASH,
+                             out["file_sha256"], out["calib_level"], out["prvversion"], config_hash,
                              res["status"], res["n_cadences"], res["n_usable_cadences"], res["n_windows"],
                              res["n_alert_windows"], res["n_events"], res["n_verified_events"],
                              dl_sec, res["process_sec"], out["wall_sec"], n_bytes, None, utc_now()))

@@ -31,7 +31,7 @@ from . import __version__, core, streaming
 FROZEN_THRESHOLD_T = 73.77965536097444
 FROZEN_METHOD = "fixed_box_2h"
 FROZEN_DURATION_HR = 2.0
-FROZEN_CONFIG_HASH = "c5214809a053e4705c5d86f29703e7682128e3db119494ed59f6c9a191e557c8"
+FROZEN_CONFIG_HASH = streaming.FROZEN_CONFIG_HASH
 
 DETECTOR_PRESETS = {
     "frozen_fixed_box_2h": {
@@ -427,6 +427,33 @@ class ExperimentStore:
                     n_cands, n_verified, throughput, utc_now(), utc_now(), utc_now()
                 ))
 
+            # One workspace record per native source run; annotations live in the workspace.
+            cols = {r[1] for r in cx.execute("PRAGMA table_info(runs)")}
+            if 'source_run_id' not in cols:
+                cx.execute("ALTER TABLE runs ADD COLUMN source_run_id TEXT")
+            imported = cx.execute("SELECT r.* FROM runs r JOIN experiments e ON e.id=r.experiment_id WHERE e.is_historical=1").fetchall()
+            for original in imported:
+                if '_source_' in original['run_id']:
+                    continue
+                record = dict(original)
+                with sqlite3.connect(Path(record['output_db_path']).as_uri() + '?mode=ro', uri=True) as source:
+                    tables = {r[0] for r in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                    native_ids = []
+                    if 'runs' in tables:
+                        rc = {r[1] for r in source.execute("PRAGMA table_info(runs)")}
+                        key = 'run_id' if 'run_id' in rc else 'id'
+                        native_ids = [str(r[0]) for r in source.execute(f"SELECT {key} FROM runs ORDER BY {key}")]
+                    for index, native_id in enumerate(native_ids):
+                        entry = dict(record)
+                        if index:
+                            entry['run_id'] = record['run_id'] + '_source_' + str(index)
+                        entry['source_run_id'] = native_id
+                        entry['run_label'] = 'Historical: ' + native_id
+                        entry['review_db_path'] = str(self.workspace_dir / 'overlays' / (entry['run_id'] + '.reviews.sqlite'))
+                        entry['candidate_count'] = source.execute("SELECT COUNT(*) FROM candidates WHERE CAST(run_id AS TEXT)=?", (native_id,)).fetchone()[0]
+                        keys = list(entry)
+                        cx.execute('INSERT OR REPLACE INTO runs (' + ','.join(keys) + ') VALUES (' + ','.join('?' for _ in keys) + ')', [entry[k] for k in keys])
+
             # Set default active experiment if unset
             cur_active = cx.execute("SELECT value FROM workspace_state WHERE key='active_experiment'").fetchone()
             if not cur_active:
@@ -519,7 +546,7 @@ class ExperimentStore:
             exp_dir = self.workspace_dir / exp_id
             exp_dir.mkdir(parents=True, exist_ok=True)
             output_db = exp_dir / f"{run_id}.sqlite"
-            review_db = exp_dir / f"{run_id}.reviews.sqlite" if is_read_only else None
+            review_db = exp_dir / f"{run_id}.reviews.sqlite"
 
             cx.execute("""
             INSERT INTO runs (
@@ -571,7 +598,7 @@ class ExperimentStore:
         exp_dir = self.workspace_dir / experiment_id
         exp_dir.mkdir(parents=True, exist_ok=True)
         output_db = exp_dir / f"{run_id}.sqlite"
-        review_db = exp_dir / f"{run_id}.reviews.sqlite" if exp.get("is_read_only") else None
+        review_db = exp_dir / f"{run_id}.reviews.sqlite"
 
         total_obs = exp.get("target_count", 0) * max(1, len(exp.get("sectors", [])))
 
@@ -634,6 +661,9 @@ class ExperimentStore:
             return (exp_row[0] if exp_row else None, run_row[0] if run_row else None)
 
     def set_active_selection(self, experiment_id: str, run_id: str):
+        run = self.get_run(run_id)
+        if not run or run["experiment_id"] != experiment_id:
+            raise ValueError("Run does not belong to experiment")
         with self._lock, self._connection() as cx:
             cx.execute("INSERT OR REPLACE INTO workspace_state VALUES ('active_experiment', ?)", (experiment_id,))
             cx.execute("INSERT OR REPLACE INTO workspace_state VALUES ('active_run', ?)", (run_id,))
@@ -647,6 +677,8 @@ class ExperimentStore:
         run = self.get_run(run_id)
         if not exp or not run:
             raise ValueError("Experiment or Run not found")
+        if run["experiment_id"] != experiment_id:
+            raise ValueError("Run does not belong to experiment")
 
         output_db = run["output_db_path"]
         review_db = run.get("review_db_path")
@@ -654,13 +686,14 @@ class ExperimentStore:
 
         # Introspect and extract candidate rows
         records: List[Dict[str, Any]] = []
+        actual_provenance = {}
         if os.path.exists(output_db):
             from .web import SurveyDatabaseAdapter
-            adapter = SurveyDatabaseAdapter(output_db, review_db_path=review_db, read_only=read_only)
+            adapter = SurveyDatabaseAdapter(output_db, review_db_path=review_db, read_only=read_only, run_id=run.get("source_run_id"))
             cx = adapter.get_connection()
             try:
                 cand_cols = {col[1] for col in cx.execute("PRAGMA table_info(candidates)").fetchall()}
-                verif_col = "c.scientific_classification" if "scientific_classification" in cand_cols else "'verified_localized_dimming'"
+                verif_col = "c.scientific_classification" if "scientific_classification" in cand_cols else "'not_run'"
                 if "scientific_reason" in cand_cols:
                     reason_col = "c.scientific_reason"
                 elif "raw_reason" in cand_cols:
@@ -707,6 +740,24 @@ class ExperimentStore:
                         "human_star_class": r[12],
                         "human_star_note": r[13]
                     })
+                for record in records:
+                    cursor = cx.execute("SELECT * FROM candidates WHERE id=?", (record['candidate_id'],))
+                    raw = dict(zip([c[0] for c in cursor.description], cursor.fetchone()))
+                    for key in ('run_id', 'observation_id', 'source_file', 'has_shoulder_flare', 'true_depth_min_pct'):
+                        record[key] = raw.get(key)
+                    record['coincidence_risk_level'] = raw.get('coincidence_risk_level') or 'unknown'
+                    record['automated_classification'] = record['automated_classification'] or 'not_run'
+                    if raw.get('observation_id') and adapter.schema_info['has_observations']:
+                        obs = cx.execute("SELECT product_filename,data_uri,file_sha256 FROM observations WHERE id=?", (raw['observation_id'],)).fetchone()
+                        if obs:
+                            record.update(zip(('product_filename','data_uri','file_sha256'), obs))
+                if adapter.run_id:
+                    run_cols = {c[1] for c in cx.execute("PRAGMA table_info(runs)")}
+                    key = 'run_id' if 'run_id' in run_cols else 'id'
+                    cursor = cx.execute(f"SELECT * FROM runs WHERE CAST({key} AS TEXT)=?", (adapter.run_id,))
+                    result = cursor.fetchone()
+                    if result:
+                        actual_provenance = dict(zip([c[0] for c in cursor.description], result))
             finally:
                 cx.close()
 
@@ -729,6 +780,12 @@ class ExperimentStore:
             )
         }
 
+        if actual_provenance:
+            for key in ('threshold_t', 'config_hash', 'software_version', 'method', 'settings_json', 'b0_hash', 'b1_hash'):
+                provenance[key] = actual_provenance.get(key, 'unavailable')
+            provenance['source_run_id'] = actual_provenance.get('run_id', actual_provenance.get('id'))
+        provenance['data_kind'] = 'synthetic demonstration' if exp['id'] == 'exp_demo' or 'synthetic' in exp.get('description', '').lower() else 'observational / consult source provenance'
+
         if fmt.lower() == "json":
             payload = {
                 "provenance": provenance,
@@ -748,7 +805,9 @@ class ExperimentStore:
             "candidate_id", "tic", "sector", "center_btjd", "detector_score", "width_hr", "depth_ppm",
             "automated_classification", "automated_reason",
             "human_event_review", "human_event_note",
-            "human_star_review", "human_star_class", "human_star_note"
+            "human_star_review", "human_star_class", "human_star_note",
+            "run_id", "observation_id", "source_file", "product_filename", "data_uri", "file_sha256",
+            "has_shoulder_flare", "true_depth_min_pct", "coincidence_risk_level"
         ]
         writer = csv.DictWriter(out, fieldnames=fieldnames)
         writer.writeheader()
@@ -810,6 +869,15 @@ class SurveyExecutionManager:
         run = self.store.get_run(run_id)
         if not run:
             raise ValueError(f"Run {run_id} not found.")
+
+        if run["experiment_id"] != experiment_id:
+            raise ValueError("Run does not belong to the supplied experiment.")
+        if exp.get("is_read_only") or exp.get("is_historical"):
+            raise ValueError("Historical and read-only experiments cannot execute surveys.")
+        if not 1 <= max_workers <= 16:
+            raise ValueError("Worker count must be between 1 and 16.")
+        if float(exp["duration_hr"]) != 2.0:
+            raise ValueError("Only the fixed two-hour detector is supported.")
 
         out_db = run["output_db_path"]
 

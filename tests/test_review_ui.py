@@ -9,7 +9,7 @@ import pytest
 import sqlite3
 
 from tess_anomaly_survey import db
-from tess_anomaly_survey.web import AnomalyReviewHandler, render_plot_png
+from tess_anomaly_survey.web import AnomalyReviewHandler, render_plot_png, SurveyDatabaseAdapter
 
 @pytest.fixture
 def test_env(tmp_path):
@@ -160,7 +160,9 @@ def test_individual_event_review_leaves_sibling_unreviewed(review_server, test_e
     con = sqlite3.connect(str(db_file))
     row1 = con.execute("SELECT review_status FROM candidates WHERE id=1").fetchone()[0]
     row2 = con.execute("SELECT review_status FROM candidates WHERE id=2").fetchone()[0]
-    assert row1 == "interesting"
+    assert row1 == "unreviewed"
+    with sqlite3.connect(SurveyDatabaseAdapter(str(db_file)).review_db_path) as overlay:
+        assert overlay.execute("SELECT status FROM candidate_review_overlay WHERE candidate_id=1").fetchone()[0] == "interesting"
     assert row2 == "unreviewed", "Reviewing event 1 must NOT automatically alter event 2"
     con.close()
 
@@ -222,7 +224,10 @@ def test_star_review_and_bulk_classification(review_server, test_env):
     cand1_status = con.execute("SELECT review_status FROM candidates WHERE id=1").fetchone()[0]
     cand2_status = con.execute("SELECT review_status FROM candidates WHERE id=2").fetchone()[0]
     assert cand1_status == "interesting", "Bulk review must NOT overwrite previously reviewed candidate 1"
-    assert cand2_status == "known"
+    assert cand2_status == "unreviewed"
+    con.close()
+    con = sqlite3.connect(SurveyDatabaseAdapter(str(db_file)).review_db_path)
+    assert con.execute("SELECT status FROM candidate_review_overlay WHERE candidate_id=2").fetchone()[0] == "known"
     hist = con.execute("SELECT previous_status, new_status, reviewer FROM review_history WHERE candidate_id=2").fetchone()
     assert hist == ("unreviewed", "known", "test_bulk_user")
     con.close()
@@ -344,6 +349,9 @@ def test_undo_star_review_restores_prior_status(review_server, test_env):
         assert res["undo"]["reverted_to"] == "unreviewed"
 
     con = sqlite3.connect(str(db_file))
+    assert con.execute("SELECT status FROM star_reviews WHERE tic='TIC:1001'").fetchone() is None
+    con.close()
+    con = sqlite3.connect(SurveyDatabaseAdapter(str(db_file)).review_db_path)
     assert con.execute("SELECT status FROM star_reviews WHERE tic='TIC:1001'").fetchone()[0] == "unreviewed"
     con.close()
 
