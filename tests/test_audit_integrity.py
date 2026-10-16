@@ -1,11 +1,13 @@
 """Counterexamples from the independent v0.3.0-beta audit."""
 import hashlib
 import sqlite3
+import threading
 
 import numpy as np
 import pytest
 
 from tess_anomaly_survey import db, streaming
+from tess_anomaly_survey import vetting
 from tess_anomaly_survey.experiments import ExperimentStore, SurveyExecutionManager
 from tess_anomaly_survey.web import SurveyDatabaseAdapter, resolve_light_curve_series
 from test_streaming import create_synthetic_fits
@@ -75,3 +77,63 @@ def test_product_cache_and_fits_identity(tmp_path):
         streaming.validate_fits_identity(first, '1', 2)
     with pytest.raises(FileNotFoundError, match='substitution'):
         resolve_light_curve_series('1', 1, source_file='missing-synthetic.npz')
+
+
+def test_cancel_commit_resume_duplicates_and_restart(tmp_path, monkeypatch):
+    path = str(tmp_path / 'cancel.sqlite')
+    cancel = threading.Event()
+    calls = []
+    def resolve(tic, sector=None, **kwargs):
+        filename = f'tess-s0001-{tic}-lc.fits'
+        return dict(sector=1, product_filename=filename, download_url='https://example.invalid/' + filename)
+    def worker(item, *args):
+        tic = str(item['tic'])
+        calls.append(tic)
+        if len(calls) == 1:
+            cancel.set()
+        return dict(success=True, tic=tic, sector=1, obs_id=tic,
+                    product_filename=item['product_filename'], data_uri='mast:' + tic,
+                    source_url='public-test-fixture', file_sha256='test', prvversion='test',
+                    calib_level=2, file_bytes=0, download_sec=0., wall_sec=0.,
+                    result=dict(camera=1, ccd=1, tmag=10., teff=5000., status='completed',
+                                n_cadences=1000, n_usable_cadences=1000, n_windows=1,
+                                n_alert_windows=0, n_events=0, n_verified_events=0,
+                                candidates=[], process_sec=0.))
+    monkeypatch.setattr(streaming, 'resolve_mast_product', resolve)
+    monkeypatch.setattr(streaming, '_worker_process_task', worker)
+    targets = [{'tic': '1'}, {'tic': '1'}, {'tic': '1', 'sector': 1}, {'tic': '2'}, {'tic': '3'}]
+    result = streaming.stream_pipeline(targets, path, 'r', max_workers=1, check_dev_universe=False, cancel_event=cancel)
+    assert result['cancelled'] and calls == ['1']
+    with sqlite3.connect(path) as cx:
+        assert cx.execute('SELECT COUNT(*) FROM observations').fetchone()[0] == 1
+    cancel.clear()
+    result = streaming.stream_pipeline(targets, path, 'r', max_workers=1, check_dev_universe=False, cancel_event=cancel)
+    assert calls == ['1', '2', '3']
+    with sqlite3.connect(path) as cx:
+        assert cx.execute('SELECT COUNT(*) FROM observations').fetchone()[0] == 3
+    result = streaming.stream_pipeline(targets, path, 'r', max_workers=1, check_dev_universe=False)
+    assert result['n_processed'] == 0
+    store = ExperimentStore(tmp_path / 'workspace')
+    exp = store.create_experiment('restart', '', '', ['1'], [1])
+    run_id = exp['runs'][0]['run_id']
+    store.update_run(run_id, status='running')
+    SurveyExecutionManager(store)
+    assert store.get_run(run_id)['status'] == 'interrupted'
+
+
+def test_versioned_coherence_comparison():
+    time = np.arange(720) * 2 / 1440
+    good = np.ones(720, dtype=bool)
+    isolated = np.zeros(720)
+    isolated[[340, 360, 380]] = -.01
+    kwargs = dict(center_btjd=time[360], mf_depth_ppm=10000.)
+    assert vetting.verify_event_photometry(time, isolated, good, **kwargs)['is_verified']
+    result = vetting.verify_event_photometry_v2(time, isolated, good, **kwargs)
+    assert not result['is_verified'] and result['verifier_version'] == 'coherence_v2'
+    contiguous = np.zeros(720)
+    contiguous[340:381] = -.01
+    for method in (vetting.verify_event_photometry, vetting.verify_event_photometry_v2):
+        assert method(time, contiguous, good, **kwargs)['is_verified']
+    # Masking must not join physically disjoint samples into a coherent run.
+    good[341:380] = False
+    assert not vetting.verify_event_photometry_v2(time, contiguous, good, **kwargs)['is_verified']

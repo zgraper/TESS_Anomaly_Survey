@@ -290,7 +290,7 @@ def resolve_mast_product(
             "service": "Mast.Caom.Filtered",
             "format": "json",
             "params": {
-                "columns": "obs_id,sequence_number,target_name",
+                "columns": "obsid,obs_id,sequence_number,target_name",
                 "filters": [
                     {"paramName": "provenance_name", "values": ["SPOC"]},
                     {"paramName": "target_name", "values": [clean_tic]},
@@ -310,7 +310,7 @@ def resolve_mast_product(
     if not records:
         raise FileNotFoundError(f"No SPOC observations found on MAST for TIC {clean_tic} (sector={sector})")
 
-    obs_id = records[0]["obs_id"]
+    obs_id = records[0]["obsid"]
     sec = int(records[0]["sequence_number"])
 
     # Query products for this obs_id
@@ -630,7 +630,7 @@ def process_observation(
         depth = float(cl["depth_ppm"])
         n_supp = int(cl.get("n_support_windows", 1))
 
-        ver_res = vetting.verify_event_photometry(
+        ver_res = vetting.verify_event_photometry_v2(
             t_arr, f_arr, g_arr,
             center_btjd=center,
             width_hr=width,
@@ -678,11 +678,11 @@ def process_observation(
             "raw_outcome": raw_out,
             "raw_reason": raw_reason,
             "scientific_classification": sci_class,
-            "scientific_description": sci_desc,
+            "scientific_description": sci_desc + " [post-detection coherence_v2]",
             "true_depth_min_pct": ver_res["true_depth_min_pct"],
             "true_depth_mean_pct": ver_res["true_depth_mean_pct"],
             "consecutive_depressed": ver_res["consecutive_depressed"],
-            "has_shoulder_flare": 1 if has_flare else 0,
+            "has_shoulder_flare": None if has_flare is None else int(has_flare),
             "shoulder_elevation_pct": sh_elev,
             "supporting_detections": cl.get("supporting_detections", [])
         })
@@ -749,6 +749,8 @@ def _worker_process_task(
         }
 
     try:
+        if item.get('_resolution_error'):
+            raise ValueError(item['_resolution_error'])
         # Resolve product
         dl_url = item.get("source_url") or item.get("download_url")
         fname = item.get("filename") or item.get("product_filename")
@@ -770,7 +772,9 @@ def _worker_process_task(
             prv_ver = resolved["prvversion"]
             cal_lvl = resolved["calib_level"]
 
-        # Thread-unique destination file
+        if Path(filename).name != filename or '/' in filename or '\\' in filename:
+            raise ValueError("Invalid archive product filename")
+        # Task-unique destination file
         dest_file = temp_cache / f"w{worker_id}_{filename}"
         n_bytes, dl_sec, sha256_hash = download_light_curve(download_url, str(dest_file), session=session)
 
@@ -817,6 +821,26 @@ def _worker_process_task(
         }
 
 
+def execution_configuration(threshold_t=FROZEN_THRESHOLD_T, method="fixed_box_2h"):
+    effective_config = {
+        "length": 512, "stride": 256, "min_good": 0.97,
+        "threshold_t": threshold_t, "method": method,
+        "quality_mask": TESS_DEFAULT_QUALITY_MASK,
+        "b0_hash": core.ORIGINAL_B0_SHA256, "b1_hash": core.ORIGINAL_B1_SHA256,
+        "post_detection_method": "coherence_v2",
+    }
+    effective_config['scientific_source_hashes'] = {
+        name: hashlib.sha256(Path(__file__).with_name(name + '.py').read_bytes().replace(b'\r\n', b'\n')).hexdigest()
+        for name in ('streaming', 'vetting', 'periodicity', 'core')
+    }
+    config_json = json.dumps(effective_config, sort_keys=True, separators=(",", ":"))
+    # This execution fingerprint covers post-processing too; retain the historical
+    # calibration hash separately instead of falsely equating the two contracts.
+    config_hash = hashlib.sha256(config_json.encode()).hexdigest()
+
+    return effective_config, config_json, config_hash
+
+
 def stream_pipeline(
     targets: List[Dict[str, Any]],
     db_path: str,
@@ -843,17 +867,7 @@ def stream_pipeline(
         raise ValueError("Only the fixed two-hour detector is supported.")
     if not math.isfinite(threshold_t) or threshold_t <= 0:
         raise ValueError("Threshold must be finite and positive.")
-    effective_config = {
-        "length": 512, "stride": 256, "min_good": 0.97,
-        "threshold_t": threshold_t, "method": method,
-        "quality_mask": TESS_DEFAULT_QUALITY_MASK,
-        "b0_hash": core.ORIGINAL_B0_SHA256, "b1_hash": core.ORIGINAL_B1_SHA256,
-        "post_detection_method": "legacy_v1",
-    }
-    config_json = json.dumps(effective_config, sort_keys=True, separators=(",", ":"))
-    # This execution fingerprint covers post-processing too; retain the historical
-    # calibration hash separately instead of falsely equating the two contracts.
-    config_hash = hashlib.sha256(config_json.encode()).hexdigest()
+    effective_config, config_json, config_hash = execution_configuration(threshold_t, method)
 
     dev_tics = set()
     if check_dev_universe:
@@ -895,29 +909,41 @@ def stream_pipeline(
                 completed_tic_sec.add((f"TIC:{tic_clean}", int(r[1])))
                 completed_tic_sec.add((tic_clean, int(r[1])))
 
-    # Filter targets for resumption
+    # Resolve identities before scheduling, then deduplicate exact archive products.
     pending_targets = []
+    seen_products = set()
+    seen_requests = set()
     n_skipped = 0
-    for it in targets:
-        clean_t = str(it.get('tic_id') or it.get('tic')).replace('TIC:', '').strip()
-        tic_str = f"TIC:{clean_t}"
-        sec = int(it.get('sector')) if it.get('sector') is not None else None
-        fname = it.get('filename') or it.get('product_filename')
-        if resume and sec is not None:
-            if fname:
-                # If a specific archive product was requested, strictly check for that product
-                if (tic_str, sec, fname) in completed_obs:
-                    n_skipped += 1
-                    continue
-            else:
-                # If no specific product filename was provided, deduplicate by star and sector
-                if (tic_str, sec) in completed_tic_sec or (clean_t, sec) in completed_tic_sec:
-                    n_skipped += 1
-                    continue
-        pending_targets.append(it)
-
-    if max_observations > 0:
-        pending_targets = pending_targets[:max_observations]
+    for original in targets:
+        if cancel_event and cancel_event.is_set():
+            break
+        item = dict(original)
+        clean_t = str(item.get('tic_id') or item.get('tic')).replace('TIC:', '').strip()
+        sec = int(item['sector']) if item.get('sector') is not None else None
+        fname = item.get('filename') or item.get('product_filename')
+        request_key = (clean_t, sec, fname)
+        if request_key in seen_requests:
+            n_skipped += 1
+            continue
+        seen_requests.add(request_key)
+        if not fname or not (item.get('source_url') or item.get('download_url')):
+            try:
+                resolved = resolve_mast_product(clean_t, sec)
+                if fname and fname != resolved['product_filename']:
+                    raise ValueError('Requested product differs from resolved archive product')
+                item.update(resolved)
+                item['filename'] = resolved['product_filename']
+                fname, sec = resolved['product_filename'], resolved['sector']
+            except Exception as exc:
+                item['_resolution_error'] = str(exc)
+        key = (f'TIC:{clean_t}', sec, fname)
+        if key in seen_products or (resume and key in completed_obs):
+            n_skipped += 1
+            continue
+        seen_products.add(key)
+        pending_targets.append(item)
+        if max_observations > 0 and len(pending_targets) >= max_observations:
+            break
 
     total_download_bytes = 0
     total_download_time = 0.0
@@ -942,22 +968,27 @@ def stream_pipeline(
     try:
         # Bounded thread pool execution
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_item = {}
-            for idx, item in enumerate(pending_targets):
-                worker_id = idx % max_workers
-                s = sessions[worker_id]
-                fut = executor.submit(
-                    _worker_process_task,
-                    item, temp_cache, s, worker_id, retain_fits,
-                    check_dev_universe, dev_tics, rate_limit_delay_sec,
-                    threshold_t, method
-                )
-                future_to_item[fut] = item
-
-            # Process completed results sequentially on main thread for DB safety
-            for fut in concurrent.futures.as_completed(future_to_item):
-                if cancel_event and cancel_event.is_set():
-                    break
+            def completed_jobs():
+                remaining = iter(enumerate(pending_targets))
+                active = set()
+                def fill():
+                    while len(active) < max_workers and not (cancel_event and cancel_event.is_set()):
+                        pair = next(remaining, None)
+                        if pair is None:
+                            break
+                        idx, item = pair
+                        active.add(executor.submit(
+                            _worker_process_task, item, temp_cache, None, idx,
+                            retain_fits, check_dev_universe, dev_tics,
+                            rate_limit_delay_sec, threshold_t, method))
+                fill()
+                while active:
+                    done, active = concurrent.futures.wait(active, return_when=concurrent.futures.FIRST_COMPLETED)
+                    for future in done:
+                        yield future
+                    # Completed observations are committed before new work is submitted.
+                    fill()
+            for fut in completed_jobs():
                 n_processed += 1
                 out = fut.result()
                 dest_file = out.get("dest_file")
@@ -975,6 +1006,7 @@ def stream_pipeline(
                         sec = out["sector"]
 
                         with con:
+                            cur.execute("DELETE FROM observations WHERE run_id=? AND tic=? AND sector=? AND status='failed'", (run_id, tic_tag, sec))
                             cur.execute("""
                             INSERT INTO observations (
                                 run_id, tic, sector, camera, ccd, tmag, teff, obs_id, product_filename,
@@ -1037,7 +1069,7 @@ def stream_pipeline(
                                 download_time_sec, process_time_sec, total_time_sec, file_bytes, error_message, created_utc
                             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                             (run_id, tic_tag, out.get("sector", -1), 0, 0, math.nan, math.nan, "",
-                             dest_file.name if dest_file else "unknown", None, None, None, 2, "", FROZEN_CONFIG_HASH,
+                             dest_file.name if dest_file else "unknown", None, None, None, 2, "", config_hash,
                              "failed", 0, 0, 0, 0, 0, 0, 0.0, 0.0, out["wall_sec"], 0, str(out.get("error")), utc_now()))
 
                 finally:
@@ -1103,7 +1135,7 @@ def stream_pipeline(
 
         con.close()
 
-        if not temp_dir and temp_cache.exists():
+        if not temp_dir and not retain_fits and temp_cache.exists():
             try:
                 shutil.rmtree(temp_cache, ignore_errors=True)
             except OSError:
@@ -1116,6 +1148,7 @@ def stream_pipeline(
         "n_successful": n_successful,
         "n_failed": n_failed,
         "n_skipped": n_skipped,
+        "cancelled": bool(cancel_event and cancel_event.is_set()),
         "total_download_mb": total_download_bytes / (1024 * 1024),
         "total_download_sec": total_download_time,
         "total_process_sec": total_process_time,

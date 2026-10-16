@@ -52,12 +52,12 @@ DETECTOR_PRESETS = {
         "name": "Experimental Custom Configuration",
         "threshold_t": FROZEN_THRESHOLD_T,
         "duration_hr": FROZEN_DURATION_HR,
-        "method": "custom_box",
+        "method": "fixed_box_2h",
         "is_frozen": False,
         "calibration_source": "User-specified experimental parameters",
         "b0_sha256": core.ORIGINAL_B0_SHA256,
         "b1_sha256": core.ORIGINAL_B1_SHA256,
-        "limitations": "Experimental configuration — Not part of the published frozen methodology."
+        "limitations": "Experimental configuration â€” Not part of the published frozen methodology."
     }
 }
 
@@ -284,8 +284,8 @@ class ExperimentStore:
         historical_definitions = [
             {
                 "id": "exp_phase7_development",
-                "name": "Phase 7 Development Survey (Sectors 1–10)",
-                "description": "Empirical survey across 9,753 observations in Sectors 1–10.",
+                "name": "Phase 7 Development Survey (Sectors 1â€“10)",
+                "description": "Empirical survey across 9,753 observations in Sectors 1â€“10.",
                 "scientific_objective": (
                     "Empirical localized dimming survey using frozen fixed_box_2h detector "
                     "with cross-camera and cross-star coincidence auditing."
@@ -336,7 +336,7 @@ class ExperimentStore:
             {
                 "id": "exp_streaming_pilot",
                 "name": "Phase 7 Streaming Pilot Survey",
-                "description": "Pilot streaming run (Sectors 1–10) validating zero-disk architecture.",
+                "description": "Pilot streaming run (Sectors 1â€“10) validating zero-disk architecture.",
                 "scientific_objective": "Pilot validation of streaming pipeline and worker performance.",
                 "run_id": "run_streaming_pilot",
                 "candidate_paths": [
@@ -513,6 +513,10 @@ class ExperimentStore:
         preset = DETECTOR_PRESETS.get(config_preset, DETECTOR_PRESETS["frozen_fixed_box_2h"])
         eff_threshold = float(threshold_t) if threshold_t is not None else float(preset["threshold_t"])
         eff_duration = float(duration_hr) if duration_hr is not None else float(preset["duration_hr"])
+        if eff_duration != 2.0:
+            raise ValueError("Only a two-hour template is supported; custom duration is disabled.")
+        if not math.isfinite(eff_threshold) or eff_threshold <= 0:
+            raise ValueError("Threshold must be finite and positive.")
 
         exp_slug = re.sub(r"[^a-zA-Z0-9_]+", "_", name.strip().lower())[:30]
         ts_id = time.strftime("%Y%m%d_%H%M%S")
@@ -525,7 +529,7 @@ class ExperimentStore:
             and abs(eff_duration - FROZEN_DURATION_HR) < 1e-6
             and config_preset == "frozen_fixed_box_2h"
         )
-        cfg_hash = FROZEN_CONFIG_HASH if is_truly_frozen else f"custom_{ts_id}"
+        cfg_hash = streaming.execution_configuration(eff_threshold)[2]
 
         with self._lock, self._connection() as cx:
             cx.execute("""
@@ -625,7 +629,7 @@ class ExperimentStore:
             "candidate_count", "verified_count", "throughput_obs_hr",
             "elapsed_sec", "eta_sec", "peak_ram_mb", "avg_cpu_pct",
             "started_utc", "ended_utc", "error_message", "settings_json",
-            "output_db_path", "review_db_path"
+            "output_db_path", "review_db_path", "total_targets"
         }
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
@@ -829,6 +833,8 @@ class SurveyExecutionManager:
         self._lock = threading.Lock()
         # Active jobs: run_id -> {thread, cancel_event, telemetry, db_path}
         self._active_jobs: Dict[str, Dict[str, Any]] = {}
+        with store._connection() as cx:
+            cx.execute("UPDATE runs SET status='interrupted', error_message='Application stopped during execution; resume explicitly.' WHERE status='running'")
 
     def is_run_active(self, run_id: str) -> bool:
         with self._lock:
@@ -1037,12 +1043,18 @@ class SurveyExecutionManager:
             except Exception:
                 pass
 
-            final_status = "aborted" if cancel_event.is_set() else "completed"
+            final_status = "aborted" if cancel_event.is_set() else ("completed_with_errors" if metrics['n_failed'] else "completed")
+            completed_count = 0
+            with sqlite3.connect(Path(out_db).as_uri() + '?mode=ro', uri=True) as cx:
+                completed_count = cx.execute("SELECT COUNT(*) FROM observations WHERE run_id=? AND status != 'failed'", (run_id,)).fetchone()[0]
             tot_elapsed = time.perf_counter() - t_start
 
             self.store.update_run(
                 run_id,
                 status=final_status,
+                completed_obs=completed_count,
+                processed_targets=completed_count + metrics['n_failed'],
+                failed_obs=metrics['n_failed'],
                 ended_utc=utc_now(),
                 candidate_count=final_cands,
                 verified_count=final_verif,

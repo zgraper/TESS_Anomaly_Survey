@@ -7,7 +7,7 @@ The original B1 statistical detectors, reproduced **byte-for-byte** in the `src/
 | `src/experiment_b0.py` | `9c8afe63ec2763b9db57c828b52b0e7d262bb30b203f86e559836dd5beb89f00` |
 | `src/experiment_b1.py` | `c5214809a053e4705c5d86f29703e7682128e3db119494ed59f6c9a191e557c8` |
 
-The survey refuses to run when these files are silently edited. Other historical scripts are stored under `research/frozen/`, with final B2.2 reports, source hashes and the pre-scoring sector-balanced amendment.
+The survey refuses to run when these files are silently edited. Private research artifacts are not shipped in this public repository. See [`calibration_provenance.json`](../src/tess_anomaly_survey/calibration_provenance.json) for the sanitized calibration identity and limitations. Historical statistics below are reported context, not independently reproduced by this software test suite.
 
 A **separate survey calibration artifact** is created for the new scanning window population. It records the detector, source hashes, target, window settings, cutpoints, per-group empirical thresholds, number of stars/windows and the exact TIC set excluded from independent validation. It does not modify B1.2 calibration or retroactively improve the published B2.2 scores.
 

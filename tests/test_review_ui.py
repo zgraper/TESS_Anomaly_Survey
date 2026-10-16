@@ -11,6 +11,27 @@ import sqlite3
 from tess_anomaly_survey import db
 from tess_anomaly_survey.web import AnomalyReviewHandler, render_plot_png, SurveyDatabaseAdapter
 
+
+@pytest.mark.parametrize('path', ['/', '/api/stats', '/api/stars'])
+@pytest.mark.parametrize('headers', [
+    {'Host': 'evil.example'}, {'Host': 'localhost:1'},
+    {'Origin': 'http://localhost:1'}, {'Origin': 'null'},
+    {'Sec-Fetch-Site': 'cross-site'},
+])
+def test_read_authority_security(review_server, path, headers):
+    with pytest.raises(urllib.error.HTTPError) as error:
+        urllib.request.urlopen(urllib.request.Request(review_server + path, headers=headers))
+    assert error.value.code == 403
+
+
+def test_browser_write_requires_csrf_token(review_server):
+    payload = json.dumps({'candidate_id': 1, 'status': 'interesting'}).encode()
+    request = urllib.request.Request(review_server + '/api/review', data=payload,
+        headers={'Content-Type': 'application/json', 'Origin': review_server})
+    with pytest.raises(urllib.error.HTTPError) as error:
+        urllib.request.urlopen(request)
+    assert error.value.code == 403
+
 @pytest.fixture
 def test_env(tmp_path):
     db_file = tmp_path / "review_test.sqlite"

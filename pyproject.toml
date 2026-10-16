@@ -39,6 +39,9 @@ py-modules = ["experiment_b0", "experiment_b1"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+tess_anomaly_survey = ["calibration_provenance.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

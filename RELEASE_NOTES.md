@@ -1,3 +1,16 @@
+# Local audit correction candidate (unpublished)
+
+- Read-only scientific source access with run-bound review overlays and launch guards.
+- Exact archive product resolution, FITS target/sector/cadence checks, isolated caches and scoped exports.
+- Immutable execution fingerprints, bounded scheduling, product deduplication and explicit restart recovery.
+- Corrected experiment/progress contract, plot cleanup and supported two-hour custom threshold controls.
+- Separate `coherence_v2` post-detection gate; historical v1 classifications and frozen B0/B1 are preserved.
+- Numeric MAST Products identifiers, dependency-free CSV export, same-origin/CSRF protection, truthful evidence states and documentation.
+
+This branch is not published and does not replace `v0.3.0-beta`. See [audit corrections](docs/AUDIT_CORRECTIONS.md) for acceptance results and remaining limitations.
+
+---
+
 # Release Notes
 
 ## v0.3.0-beta — Star-Centered Research Workspace & Public Beta (2026-10-16)

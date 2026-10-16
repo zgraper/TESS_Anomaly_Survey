@@ -460,11 +460,16 @@ def do_stream(args):
     if getattr(args, 'export', None):
         if not Path(db_path).is_file():
             raise FileNotFoundError(f"Database not found: {db_path}")
-        con = sqlite3.connect(db_path)
-        import pandas as pd
-        df = pd.read_sql_query("SELECT * FROM candidates", con)
-        df.to_csv(args.export, index=False)
-        print(f"Exported {len(df)} candidate records to {args.export}")
+        from .web import SurveyDatabaseAdapter
+        adapter = SurveyDatabaseAdapter(db_path, run_id=getattr(args, 'run_id', None))
+        con = adapter.get_connection()
+        cursor = con.execute("SELECT c.*, COALESCE(o.status,c.review_status) AS effective_review_status FROM candidates c LEFT JOIN overlay.candidate_review_overlay o ON o.candidate_id=c.id")
+        rows = cursor.fetchall()
+        with open(args.export, 'w', newline='', encoding='utf-8') as output:
+            writer = csv.writer(output)
+            writer.writerow([column[0] for column in cursor.description])
+            writer.writerows(rows)
+        print(f"Exported {len(rows)} candidate records to {args.export}")
         con.close()
         return
 

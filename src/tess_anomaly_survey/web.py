@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import secrets
 import sqlite3
 import sys
 import threading
@@ -1105,13 +1106,20 @@ class AnomalyReviewHandler(BaseHTTPRequestHandler):
         self.cache_dir = cache_dir
         self.review_db = review_db
         self.read_only = read_only
-        self._default_adapter = SurveyDatabaseAdapter(db_path, review_db_path=review_db, read_only=read_only) if db_path else None
+        self._default_adapter = None
+        self._default_adapter_args = (db_path, review_db, read_only)
         super().__init__(*args, **kwargs)
 
     @property
     def adapter(self) -> SurveyDatabaseAdapter:
         if hasattr(self.server, "experiment_store") and self.server.experiment_store is not None:
             exp_id, run_id = self.server.experiment_store.get_active_selection()
+            selected = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get('workspace_run_id', [None])[0]
+            if selected:
+                selected_run = self.server.experiment_store.get_run(selected)
+                if not selected_run:
+                    raise ValueError("Requested workspace run does not exist")
+                run_id, exp_id = selected, selected_run['experiment_id']
             if run_id:
                 run = self.server.experiment_store.get_run(run_id)
                 exp = self.server.experiment_store.get_experiment(exp_id) if exp_id else None
@@ -1133,6 +1141,8 @@ class AnomalyReviewHandler(BaseHTTPRequestHandler):
                     if exp and exp.get("targets"):
                         ad.valid_targets = {sanitize_tic(t) for t in exp["targets"]}
                     return ad
+        if self._default_adapter is None and self._default_adapter_args[0]:
+            self._default_adapter = SurveyDatabaseAdapter(*self._default_adapter_args)
         if self._default_adapter is not None:
             return self._default_adapter
         raise RuntimeError("No active survey database adapter available.")
@@ -1170,13 +1180,37 @@ class AnomalyReviewHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def _request_allowed(self, write=False):
+        port = self.server.server_address[1]
+        authorities = {f'127.0.0.1:{port}', f'localhost:{port}', f'[::1]:{port}'}
+        host = self.headers.get('Host', '').lower()
+        origin = self.headers.get('Origin')
+        allowed = self._is_localhost() and host in authorities
+        if origin is not None:
+            allowed = allowed and origin == 'http://' + host
+        if self.headers.get('Sec-Fetch-Site') in ('cross-site', 'same-site'):
+            allowed = False
+        if write:
+            allowed = allowed and self.headers.get('Content-Type', '').split(';')[0] == 'application/json'
+            # Browser writes require the token embedded in the same-origin page.
+            # Non-browser JSON clients without Origin remain supported on loopback.
+            if origin is not None or self.headers.get('Sec-Fetch-Site'):
+                allowed = allowed and secrets.compare_digest(self.headers.get('X-CSRF-Token', ''), getattr(self.server, 'csrf_token', 'missing'))
+        if not allowed:
+            self.send_json({'error': 'Forbidden: invalid authority, origin, or CSRF token'}, HTTPStatus.FORBIDDEN)
+        return allowed
+
     def do_GET(self):
+        if not self._request_allowed():
+            return
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
 
         if path == "/":
-            self.send_html(INDEX_HTML)
+            if not hasattr(self.server, 'csrf_token'):
+                self.server.csrf_token = secrets.token_urlsafe(32)
+            self.send_html(INDEX_HTML.replace('__CSRF_TOKEN__', self.server.csrf_token))
             return
 
         if path == "/api/experiments":
@@ -1185,8 +1219,8 @@ class AnomalyReviewHandler(BaseHTTPRequestHandler):
                 act_exp, act_run = self.server.experiment_store.get_active_selection()
                 self.send_json({
                     "experiments": exps,
-                    "active_experiment": act_exp,
-                    "active_run": act_run,
+                    "active_experiment": self.server.experiment_store.get_experiment(act_exp) if act_exp else None,
+                    "active_run": self.server.experiment_store.get_run(act_run) if act_run else None,
                     "presets": experiments.DETECTOR_PRESETS
                 })
             else:
@@ -1222,6 +1256,7 @@ class AnomalyReviewHandler(BaseHTTPRequestHandler):
                 is_act = self.server.execution_manager.is_run_active(run_id)
                 self.send_json({
                     "telemetry": telem,
+                    "run": self.server.experiment_store.get_run(run_id),
                     "logs": logs,
                     "is_active": is_act
                 })
@@ -1318,7 +1353,7 @@ class AnomalyReviewHandler(BaseHTTPRequestHandler):
             sector = event['sector'] if event else observation.get('sector')
             source_file = event['source_file'] if event else None
             obs_prod = observation.get('product_filename')
-            detail['events'] = [e for e in selected if e.get('observation', {}).get('id') == observation.get('id')] if observation else selected[:1]
+            detail['events'] = [e for e in selected if (e.get('observation') or {}).get('id') == observation.get('id')] if observation else selected[:1]
 
             try:
                 t, f_ppm, good, cadence, src_label = resolve_light_curve_series(
@@ -1492,24 +1527,8 @@ class AnomalyReviewHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
 
-        if not self._is_localhost():
-            self.send_json({'error': 'Forbidden: write and execution actions strictly restricted to localhost'}, HTTPStatus.FORBIDDEN)
+        if not self._request_allowed(write=True):
             return
-
-        # Validate Host header against DNS rebinding
-        host_header = self.headers.get("Host", "").split(":")[0].strip().lower()
-        if host_header and host_header not in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
-            self.send_json({'error': 'Forbidden: Invalid Host header'}, HTTPStatus.FORBIDDEN)
-            return
-
-        # Validate Origin header against cross-origin attacks (CSRF)
-        origin_header = self.headers.get("Origin")
-        if origin_header:
-            parsed_origin = urllib.parse.urlparse(origin_header)
-            origin_host = parsed_origin.hostname or ""
-            if origin_host not in ("localhost", "127.0.0.1", "::1"):
-                self.send_json({'error': 'Forbidden: Cross-origin write requests not permitted'}, HTTPStatus.FORBIDDEN)
-                return
 
         length = int(self.headers.get("Content-Length", 0))
         if length <= 0 or length > 524288:
@@ -1626,7 +1645,7 @@ class AnomalyReviewHandler(BaseHTTPRequestHandler):
                         max_workers=workers,
                         resume=resume
                     )
-                    self.send_json({"success": True, "telemetry": telem})
+                    self.send_json({"success": True, "telemetry": telem, "run": self.server.experiment_store.get_run(run_id)})
                 except RuntimeError as e:
                     self.send_json({"error": str(e)}, HTTPStatus.CONFLICT)
                 except Exception as e:
@@ -1783,7 +1802,7 @@ def serve_review_ui(
                 scientific_objective="Exploratory candidate review",
                 targets=[],
                 sectors=[],
-                is_read_only=read_only
+                is_read_only=True
             )
             run_id = adhoc_exp["runs"][0]["run_id"]
             store.update_run(run_id, output_db_path=db_path_resolved, review_db_path=review_db)
@@ -2625,7 +2644,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 </div>
                 <div>
                   <label style="font-size:11px; color:var(--text-secondary);">Custom Box Duration (hours):</label>
-                  <input type="number" id="custom-duration" step="0.5" value="2.0" style="width:100%;">
+                  <input type="number" id="custom-duration" readonly title="Only the validated two-hour template is supported" step="0.5" value="2.0" style="width:100%;">
                 </div>
               </div>
             </div>
@@ -2710,6 +2729,16 @@ INDEX_HTML = r"""<!DOCTYPE html>
       }
     }
 
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = (resource, options = {}) => {
+      const url = new URL(resource, window.location.href);
+      if (url.origin === location.origin && url.pathname.startsWith('/api/')) {
+        if (AppState.activeRun) url.searchParams.set('workspace_run_id', AppState.activeRun.run_id);
+      }
+      options.headers = { ...options.headers, 'X-CSRF-Token': '__CSRF_TOKEN__' };
+      return nativeFetch(url, options);
+    };
+
     // Load Experiments list and active experiment
     async function loadExperiments() {
       try {
@@ -2772,7 +2801,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
       }
       const expLabel = document.getElementById('explore-active-run-label');
       if (expLabel) {
-        expLabel.innerText = `Exp: ${exp.name}` + (AppState.activeRun ? ` (Run #${AppState.activeRun.id})` : '');
+        expLabel.innerText = `Exp: ${exp.name}` + (AppState.activeRun ? ` (Run #${AppState.activeRun.run_id})` : '');
       }
     }
 
@@ -2787,13 +2816,15 @@ INDEX_HTML = r"""<!DOCTYPE html>
         if (res.success) {
           showToast(`Switched active experiment to: ${res.experiment.name}`);
           AppState.activeExperiment = res.experiment;
-          AppState.activeRun = res.active_run;
+          AppState.activeRun = res.run;
           updateExperimentBadge();
           updateProvenanceCard();
           AppState.currentPage = 1;
           AppState.expandedRows.clear();
           AppState.activeStar = null;
           AppState.activeEvent = null;
+          AppState.activeLightCurve = null;
+          AppState.lightCurveRequestId = (AppState.lightCurveRequestId || 0) + 1;
           await loadStats();
           await fetchStars();
           checkRunStatus();
@@ -2926,7 +2957,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
           sectors: checkedSectors,
           workers: workers,
           threshold_t: threshold_t,
-          duration_hours: duration_hours,
+          duration_hr: duration_hours,
           launch_immediately: autolaunch
         };
 
@@ -2974,7 +3005,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     async function pollProgressOnce() {
       if (!AppState.activeRun) return;
       try {
-        const resp = await fetch(`/api/runs/${AppState.activeRun.id}/progress`);
+        const resp = await fetch(`/api/runs/${AppState.activeRun.run_id}/progress`);
         const data = await resp.json();
         if (data.run) {
           AppState.activeRun = data.run;
@@ -3019,10 +3050,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
       const isRunning = run.status === 'running' || run.status === 'pending';
       const isCompleted = run.status === 'completed';
       const isAborted = run.status === 'aborted';
-      const isFailed = run.status === 'failed';
+      const isFailed = ['failed', 'interrupted', 'completed_with_errors'].includes(run.status);
 
       if (headerTitle) {
-        headerTitle.innerText = `SURVEY RUN #${run.id} (${run.status.toUpperCase()})`;
+        headerTitle.innerText = `SURVEY RUN #${run.run_id} (${run.status.toUpperCase()})`;
       }
 
       if (statusBadge) {
@@ -3038,15 +3069,15 @@ INDEX_HTML = r"""<!DOCTYPE html>
       if (banner) {
         banner.style.display = isRunning ? 'flex' : 'none';
         if (bannerText) {
-          bannerText.innerText = `${run.processed_observations}/${run.total_observations} obs (${run.candidates_count} candidates)`;
+          bannerText.innerText = `${run.processed_targets}/${run.total_targets} obs (${run.candidate_count} candidates)`;
         }
       }
 
       if (liveContainer) {
         liveContainer.style.display = isRunning ? 'flex' : 'none';
-        const pct = run.total_observations > 0 ? Math.min(100, (run.processed_observations / run.total_observations * 100)).toFixed(1) : '0.0';
-        document.getElementById('live-proc-count').innerText = run.processed_observations;
-        document.getElementById('live-total-count').innerText = run.total_observations;
+        const pct = run.total_targets > 0 ? Math.min(100, (run.processed_targets / run.total_targets * 100)).toFixed(1) : '0.0';
+        document.getElementById('live-proc-count').innerText = run.processed_targets;
+        document.getElementById('live-total-count').innerText = run.total_targets;
         document.getElementById('live-percent-label').innerText = `${pct}%`;
         document.getElementById('live-progress-bar').style.width = `${pct}%`;
       }
@@ -3058,23 +3089,23 @@ INDEX_HTML = r"""<!DOCTYPE html>
         btnResume.style.display = (isAborted || isFailed) ? 'inline-block' : 'none';
       }
 
-      document.getElementById('tel-obs-count').innerText = `${run.processed_observations} / ${run.total_observations}`;
-      document.getElementById('tel-candidates-count').innerText = run.candidates_count;
+      document.getElementById('tel-obs-count').innerText = `${run.processed_targets} / ${run.total_targets}`;
+      document.getElementById('tel-candidates-count').innerText = run.candidate_count;
       if (data.unique_stars !== undefined) {
         document.getElementById('tel-stars-count').innerText = data.unique_stars;
       }
-      if (run.throughput_obs_per_hr) {
-        document.getElementById('tel-throughput').innerText = Math.round(run.throughput_obs_per_hr).toLocaleString();
+      if (run.throughput_obs_hr) {
+        document.getElementById('tel-throughput').innerText = Math.round(run.throughput_obs_hr).toLocaleString();
       } else {
         document.getElementById('tel-throughput').innerText = isRunning ? 'Calculating...' : '—';
       }
-      if (run.eta_seconds !== null && run.eta_seconds !== undefined && isRunning) {
-        const m = Math.floor(run.eta_seconds / 60);
-        const s = Math.round(run.eta_seconds % 60);
+      if (run.eta_sec !== null && run.eta_sec !== undefined && isRunning) {
+        const m = Math.floor(run.eta_sec / 60);
+        const s = Math.round(run.eta_sec % 60);
         document.getElementById('tel-eta').innerText = `${m}m ${s}s`;
-      } else if (run.duration_seconds) {
-        const m = Math.floor(run.duration_seconds / 60);
-        const s = Math.round(run.duration_seconds % 60);
+      } else if (run.elapsed_sec) {
+        const m = Math.floor(run.elapsed_sec / 60);
+        const s = Math.round(run.elapsed_sec % 60);
         document.getElementById('tel-eta').innerText = `${m}m ${s}s`;
         document.getElementById('tel-eta-sub').innerText = 'Total elapsed time';
       } else {
@@ -3086,7 +3117,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
         logBox.innerHTML = '';
         data.logs.forEach(line => {
           const d = document.createElement('div');
-          d.innerText = line;
+          d.innerText = `${line.created_utc} [${line.level}] ${line.message}`;
           logBox.appendChild(d);
         });
         logBox.scrollTop = logBox.scrollHeight;
@@ -3119,18 +3150,18 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
     async function abortSurveyRun() {
       if (!AppState.activeRun) return;
-      if (!confirm(`Are you sure you want to abort Run #${AppState.activeRun.id}? Ingested observations will be preserved.`)) {
+      if (!confirm(`Are you sure you want to abort Run #${AppState.activeRun.run_id}? Ingested observations will be preserved.`)) {
         return;
       }
       try {
         const resp = await fetch('/api/runs/abort', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ run_id: AppState.activeRun.id })
+          body: JSON.stringify({ run_id: AppState.activeRun.run_id })
         });
         const res = await resp.json();
         if (res.success) {
-          showToast(`Run #${AppState.activeRun.id} abort signal sent.`);
+          showToast(`Run #${AppState.activeRun.run_id} abort signal sent.`);
           pollProgressOnce();
         } else {
           alert("Failed to abort run: " + (res.error || 'Unknown'));
@@ -3148,13 +3179,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             experiment_id: AppState.activeExperiment.id,
-            run_id: AppState.activeRun.id,
+            run_id: AppState.activeRun.run_id,
             resume: true
           })
         });
         const res = await resp.json();
         if (res.success) {
-          showToast(`Survey run #${AppState.activeRun.id} resumed!`);
+          showToast(`Survey run #${AppState.activeRun.run_id} resumed!`);
           AppState.activeRun = res.run;
           checkRunStatus();
         } else {
@@ -3167,8 +3198,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
     function exportCatalog(format) {
       let url = '';
-      if (AppState.activeRun && AppState.activeRun.id) {
-        url = `/api/runs/${AppState.activeRun.id}/export?format=${format}`;
+      if (AppState.activeRun && AppState.activeRun.run_id) {
+        url = `/api/runs/${AppState.activeRun.run_id}/export?format=${format}`;
       } else {
         url = `/api/export?format=${format}`;
       }
@@ -3478,13 +3509,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
         // Tier 1: Matched-Filter Detection Metric
         document.getElementById('prov-score').innerText = `S = ${ev.score.toFixed(2)}`;
-        document.getElementById('prov-kernel-info').innerText = `Matched ${ev.width_hr || 2.0}h box kernel (B1 Detector, T=73.78)`;
+        document.getElementById('prov-kernel-info').innerText = `Matched ${ev.width_hr || 2.0}h box kernel (B1 Detector, T=${AppState.activeExperiment ? AppState.activeExperiment.threshold_t : "unavailable"})`;
 
         // Tier 2: Automated Photometric Verification (5-State Machine)
         const verifClass = ev.scientific_classification || 'not_run';
         document.getElementById('prov-verif-class').innerText = verifClass.replace(/_/g, ' ').toUpperCase();
         document.getElementById('prov-verif-class').style.color = (verifClass === 'verified_localized_dimming') ? '#34d399' : (verifClass.includes('flare') ? '#fbbf24' : '#60a5fa');
-        document.getElementById('prov-depth').innerText = `${(ev.depth_ppm / 10000).toFixed(3)}% (${ev.depth_ppm} ppm)`;
+        document.getElementById('prov-depth').innerText = `Matched-filter: ${ev.depth_ppm} ppm; photometric minimum: ${ev.true_depth_min_pct === null ? "unavailable" : ev.true_depth_min_pct + "%"}`;
 
         if (ev.has_shoulder_flare) {
           const elev = ev.shoulder_elevation_pct ? ` (+${ev.shoulder_elevation_pct.toFixed(2)}%)` : '';
@@ -3560,7 +3591,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     function selectActiveEvent(ev) {
       AppState.activeEvent = ev;
       updateWorkspaceUI();
-      renderWorkspacePlots();
+      fetchLightCurveData(AppState.activeStar.tic, ev.sector);
     }
 
     function navigateStar(delta) {
@@ -3583,11 +3614,17 @@ INDEX_HTML = r"""<!DOCTYPE html>
           <span class="pulse-indicator" style="width:12px; height:12px; margin:0;"></span>
           <span style="font-size:12px;">Retrieving light curve for TIC ${tic} (checking cache & NASA MAST archive)...</span>
         </div>`;
+      const requestId = (AppState.lightCurveRequestId || 0) + 1;
+      AppState.lightCurveRequestId = requestId;
+      AppState.activeLightCurve = null;
+      for (const container of [fullCont, zoomCont, phaseCont]) {
+        if (container && typeof Plotly !== 'undefined') Plotly.purge(container);
+      }
       fullCont.innerHTML = loadingHtml;
       zoomCont.innerHTML = loadingHtml;
 
       try {
-        const url = `/api/star/${encodeURIComponent(tic)}/lightcurve` + (sector ? `?sector=${sector}` : '');
+        const url = `/api/star/${encodeURIComponent(tic)}/lightcurve?candidate_id=${AppState.activeEvent ? AppState.activeEvent.id : ''}`;
         const resp = await fetch(url);
         const data = await resp.json();
 
@@ -3595,10 +3632,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
           throw new Error(data.error || `HTTP ${resp.status}`);
         }
 
+        if (requestId !== AppState.lightCurveRequestId) return;
+        fullCont.innerHTML = '';
+        zoomCont.innerHTML = '';
         AppState.activeLightCurve = data;
         document.getElementById('ws-full-lc-source').innerText = 'Source: ' + (data.source || 'NASA MAST Archive');
         renderWorkspacePlots();
       } catch (e) {
+        if (requestId !== AppState.lightCurveRequestId) return;
         console.error("Failed to load light curve series", e);
         const errorHtml = `
           <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; gap:8px; padding:16px; text-align:center;">
@@ -3631,10 +3672,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
     function renderStaticPlots() {
       const cid = AppState.activeEvent ? AppState.activeEvent.id : 1;
-      document.getElementById('plot-full-container').innerHTML = `<img src="/api/plot/full/${cid}" style="width:100%; height:100%; object-fit:contain;">`;
-      document.getElementById('plot-zoom-container').innerHTML = `<img src="/api/plot/zoom/${cid}?hours=12" style="width:100%; height:100%; object-fit:contain;">`;
+      document.getElementById('plot-full-container').innerHTML = `<img src="/api/plot/full/${cid}?workspace_run_id=${AppState.activeRun.run_id}" style="width:100%; height:100%; object-fit:contain;">`;
+      document.getElementById('plot-zoom-container').innerHTML = `<img src="/api/plot/zoom/${cid}?hours=12&workspace_run_id=${AppState.activeRun.run_id}" style="width:100%; height:100%; object-fit:contain;">`;
       if (AppState.activeStar && AppState.activeStar.system && AppState.activeStar.system.is_periodic) {
-        document.getElementById('plot-phase-container').innerHTML = `<img src="/api/plot/phase/${cid}" style="width:100%; height:100%; object-fit:contain;">`;
+        document.getElementById('plot-phase-container').innerHTML = `<img src="/api/plot/phase/${cid}?workspace_run_id=${AppState.activeRun.run_id}" style="width:100%; height:100%; object-fit:contain;">`;
       }
     }
 

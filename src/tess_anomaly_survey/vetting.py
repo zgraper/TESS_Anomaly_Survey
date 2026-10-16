@@ -245,6 +245,39 @@ def rank_vetted_shortlist(
     return shortlist[:target_count]
 
 
+def verify_event_photometry_v2(time, flux, good, center_btjd, width_hr=2.0,
+                               mf_depth_ppm=0.0, min_consecutive_cadences=2):
+    """Version 2 coherence gate; legacy results remain reproducible with v1.
+
+    Reuse v1 continuum/flare measurements but require consecutive original
+    cadences AND timestamp adjacency. Masked points and gaps break a run.
+    This is a post-detection heuristic, not a recalibrated detector or FAP.
+    """
+    result = verify_event_photometry(time, flux, good, center_btjd, width_hr,
+                                     mf_depth_ppm, min_consecutive_cadences)
+    result['verifier_version'] = 'coherence_v2'
+    if 'robust_continuum' not in result:
+        result['has_flare'] = None
+        return result
+    time, flux, good = np.asarray(time), np.asarray(flux), np.asarray(good, dtype=bool)
+    differences = np.diff(time)
+    positive = differences[np.isfinite(differences) & (differences > 0)]
+    cadence = float(np.median(positive)) if positive.size else 0.0
+    depressed = (good & np.isfinite(time) & np.isfinite(flux)
+                 & (np.abs(time - center_btjd) <= width_hr / 48.0)
+                 & (flux < result['robust_continuum'] - 1.5 * result['local_noise']))
+    longest = current = 0
+    for index, value in enumerate(depressed):
+        adjacent = index > 0 and 0 < time[index] - time[index - 1] <= 1.5 * cadence
+        current = (current + 1 if adjacent else 1) if value else 0
+        longest = max(longest, current)
+    result['consecutive_depressed'] = longest
+    if result['is_verified'] and longest < min_consecutive_cadences:
+        result.update(outcome='probable_phantom', is_verified=False,
+                      reason='insufficient_timestamp_coherent_cadences_v2')
+    return result
+
+
 def verify_event_photometry(
     time: np.ndarray,
     flux: np.ndarray,

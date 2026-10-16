@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "method": "fixed_box_2h",
+  "threshold_t": 73.77965536097444,
+  "historical_config_sha256": "dc32c430b5aae7d8af069a6359efd8c49e06736994c600f258f2852eb3269d3c",
+  "b0_sha256": "9c8afe63ec2763b9db57c828b52b0e7d262bb30b203f86e559836dd5beb89f00",
+  "b1_sha256": "c5214809a053e4705c5d86f29703e7682128e3db119494ed59f6c9a191e557c8",
+  "cadence_seconds": 120,
+  "window_cadences": 512,
+  "stride_cadences": 256,
+  "minimum_good_fraction": 0.97,
+  "quality_mask": 17087,
+  "new_post_detection_method": "coherence_v2",
+  "scope": "Sanitized identity record for the inherited research cutoff, not the complete calibration dataset or an independently reproduced calibration.",
+  "limitations": "No catalog false-alarm probability or new injection-recovery performance is claimed. Private target identities, adjudication keys, and historical datasets are not distributed. New execution fingerprints include scientific source hashes and post-detection version; they are not the historical calibration hash."
+}

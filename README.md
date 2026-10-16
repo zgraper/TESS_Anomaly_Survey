@@ -20,7 +20,7 @@ Inspect aggregated target stars with anomaly metrics, event counts, minimum tran
 ![Explore Stars Catalog](docs/images/01_explore_page.png)
 
 ### Interactive Light-Curve Investigation
-Analyze observations with synchronized full-sector overview plots, localized event-zoom light curves, and interactive phase folding (powered by automated Lomb-Scargle periodograms or custom periods).
+Analyze observations with synchronized full-sector overview plots, localized event-zoom light curves, and phase folding of recorded candidate-event periodicity fits; this browser does not run Lomb–Scargle periodograms or accept custom periods.
 
 ![Investigation Workspace](docs/images/02_investigation_workspace.png)
 
@@ -115,7 +115,7 @@ tess-anomaly stream \
 
 *Note on `--allow-any-target`:* This flag enables scanning arbitrary astronomical targets outside the pre-registered development cohort.
 
-Interrupted surveys can be safely resumed at any time. Resumption tracks `(tic, sector, product_filename)` tuples to ensure distinct data products (such as 20s fast cadence vs 120s standard cadence) are never skipped.
+Resume with the same explicit `--run-id` and identical scientific settings. Resumption tracks exact `(tic, sector, product_filename)` identities. Only 120-second SPOC products are supported; other cadences are rejected. The server must remain open during execution. Restart marks unfinished jobs interrupted; resume explicitly.
 
 ---
 
@@ -125,7 +125,7 @@ This software implements the detection methodology and empirical calibration fra
 
 1. **Cadence & Windowing**:
    - The streaming pipeline is calibrated for NASA TESS SPOC 2-minute (120-second) cadence light curves from MAST.
-   - Observations are sliced into contiguous 512-cadence (~17-day) sliding analysis windows with a 256-cadence (~8.5-day) stride, preserving native quality masks and data gaps without interpolation.
+   - Observations are sliced into contiguous 512-cadence (17.07-hour) sliding analysis windows with a 256-cadence (8.53-hour) stride, preserving native quality masks and data gaps without interpolation.
 2. **Frozen Benchmark Detectors**:
    - `fixed_box_2h`: Fixed 2-hour localized box filter ($T = 73.77965536097444$ empirical cutoff calibrated on quiet stars; standard recommended default).
    - `multiscale_box`: Multiscale box filtering evaluating durations of 0.5h, 1.0h, 2.0h, 4.0h, and 8.0h.
@@ -147,7 +147,7 @@ This software implements the detection methodology and empirical calibration fra
 - **Localhost Binding Only**: By default, `review-ui` strictly binds to `127.0.0.1`.
 - **Anti-DNS Rebinding**: Incoming HTTP requests validate the `Host` header, rejecting unauthorized proxy or external DNS rebinding attempts.
 - **Anti-CSRF & Origin Verification**: Mutating `POST` endpoints enforce origin validation, preventing unauthorized cross-origin requests from browser tabs.
-- **Immutable Research Records**: Review annotations, tags, and triage notes are persisted in separate `<database_name>.reviews.sqlite` sidecars. The original survey and validation databases remain read-only and bit-identical.
+- **Immutable Research Records**: Review annotations, tags, and triage notes are persisted in separate `<database_name>.<run-fingerprint>.reviews.sqlite` (or workspace overlays) sidecars. The original survey and validation databases remain read-only and bit-identical.
 - **Terminal Portability**: Console logging uses strict ASCII formatting to prevent `UnicodeEncodeError` crashes on Windows Command Prompt / PowerShell environments.
 
 ---
@@ -161,7 +161,7 @@ tess-anomaly review-ui --db examples/sample_survey_review.sqlite --root examples
 ```
 
 ### Missing C Compiler / Binary Wheels
-All core dependencies (`numpy`, `scipy`, `astropy`, `astroquery`, `requests`, `psutil`) provide precompiled wheels on PyPI for Windows, Linux, and macOS. Ensure `pip` is updated:
+Dependency wheel availability depends on Python version and operating system. This correction cycle tests Windows; Linux and macOS commands below are guidance, not a claim of validation on those platforms. Ensure `pip` is updated:
 ```bash
 python -m pip install --upgrade pip setuptools wheel
 ```
@@ -196,3 +196,9 @@ See [`CITATION.cff`](CITATION.cff) for complete machine-readable citation metada
 
 This project is licensed under the [MIT License](LICENSE).  
 Copyright (c) 2026 Zane A. Graper.
+
+## Correction candidate
+
+See [audit corrections](docs/AUDIT_CORRECTIONS.md) for status and acceptance evidence. New streaming runs use the separately versioned `coherence_v2` post-detection gate. Legacy `verify_event_photometry` and historical classifications remain unchanged; no new scientific performance or false-alarm claim is made. Execution hashes cover the effective processing configuration and differ from the historical calibration hash.
+
+Interactive plots load Plotly from a CDN. Offline use requires local photometry and the optional `plots` dependency for static PNG plots; uncached archive data cannot be retrieved offline. Synthetic NPZ files are never replaced with real MAST observations.
