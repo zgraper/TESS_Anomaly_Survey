@@ -439,8 +439,8 @@ def test_overlay_review_database_leaves_source_database_unmodified(test_env, tmp
 
 def test_sample_dataset_loads_and_serves_investigation(tmp_path):
     """Verify that the bundled sample dataset examples/sample_survey_review.sqlite serves cleanly."""
-    sample_db = Path("examples/sample_survey_review.sqlite").resolve()
-    sample_root = Path("examples/sample_data").resolve()
+    sample_db = (Path(__file__).resolve().parents[1] / "examples/sample_survey_review.sqlite")
+    sample_root = (Path(__file__).resolve().parents[1] / "examples/sample_data")
     assert sample_db.is_file(), "Sample database must exist"
 
     class SampleHandler(AnomalyReviewHandler):

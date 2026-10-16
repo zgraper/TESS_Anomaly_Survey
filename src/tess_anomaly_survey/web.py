@@ -75,7 +75,8 @@ def resolve_light_curve_series(
     data_uri: Optional[str] = None,
     root_path: Optional[str] = None,
     cache_dir: Optional[str] = None,
-    allow_download: bool = True
+    allow_download: bool = True,
+    expected_sha256: Optional[str] = None
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, str]:
     """Retrieve time, relative flux in PPM, good mask, and cadence for a target star.
 
@@ -92,12 +93,14 @@ def resolve_light_curve_series(
         if proposed.is_file():
             local = proposed.resolve()
     fingerprint = (str(local), local.stat().st_size, local.stat().st_mtime_ns) if local else None
-    cache_key = (clean_tic, sector, source_file, product_filename, data_uri, fingerprint)
+    cache_key = (clean_tic, sector, source_file, product_filename, data_uri, fingerprint, expected_sha256)
     with _CACHE_LOCK:
         cached = _LIGHT_CURVE_CACHE.get(cache_key)
         if cached:
             return cached['time'], cached['flux_ppm'], cached['good'], cached['cadence'], cached['source']
     if local:
+        if expected_sha256 and hashlib.sha256(local.read_bytes()).hexdigest() != expected_sha256:
+            raise ValueError("Local product checksum differs from the recorded observation")
         if local.name.lower().endswith(('.fits', '.fit', '.fits.gz')):
             streaming.validate_fits_identity(local, clean_tic, sector)
         t, f, good, cad = _load_local_light_curve(local)
@@ -122,6 +125,8 @@ def resolve_light_curve_series(
             raise FileNotFoundError("Recorded archive product is not cached.")
         url = "https://mast.stsci.edu/api/v0.1/Download/file?uri=" + urllib.parse.quote(expected_uri, safe='')
         streaming.download_light_curve(url, str(dest), timeout=35.0, max_retries=2)
+    if expected_sha256 and hashlib.sha256(dest.read_bytes()).hexdigest() != expected_sha256:
+        raise ValueError("Archive product checksum differs from the recorded observation")
     streaming.validate_fits_identity(dest, clean_tic, sector)
     t, f, good, cad = _load_local_light_curve(dest)
     return _cache_and_return(cache_key, t, f, good, cad, f"mast:{product_filename}")
@@ -185,11 +190,17 @@ class SurveyDatabaseAdapter:
             raise ValueError("Requested run is absent from the source database.")
         self.run_id = str(run_id) if run_id is not None else next(iter(ids), None)
         self._multiple_runs = len(ids) > 1
+        self.data_kind = 'synthetic demonstration' if self.run_id == 'sample_survey_run' else 'observational / consult source provenance'
         suffix = hashlib.sha256((self.run_id or 'legacy').encode()).hexdigest()[:16]
         self.review_db_path = str(Path(review_db_path).resolve()) if review_db_path else str(
             Path(self.db_path).with_suffix(f".{suffix}.reviews.sqlite"))
         if self.review_db_path == self.db_path:
             raise ValueError("Review overlay must be separate from scientific results.")
+        if Path(self.review_db_path).is_file():
+            with sqlite3.connect(Path(self.review_db_path).as_uri() + '?mode=ro', uri=True) as cx:
+                tables = {r[0] for r in cx.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if tables & {'candidates', 'observations', 'runs'}:
+                    raise ValueError("Scientific database cannot be used as a review overlay.")
         self._init_overlay_db(self.review_db_path)
         with sqlite3.connect(self.review_db_path) as cx:
             cx.execute("CREATE TABLE IF NOT EXISTS source_binding (source_path TEXT, run_id TEXT)")
@@ -368,6 +379,7 @@ class SurveyDatabaseAdapter:
                 'verifications': dict(verif_counts),
                 'read_only': self.read_only,
                 'has_overlay': self.review_db_path is not None,
+                'data_kind': self.data_kind,
                 'db_name': Path(self.db_path).name
             }
         finally:
@@ -650,19 +662,19 @@ class SurveyDatabaseAdapter:
                 ORDER BY c.score DESC
             '''
 
-            rows = cx.execute(sql, (tic, f"TIC:{clean_tic}")).fetchall()
+            rows = cx.execute(sql, (clean_tic, f"TIC:{clean_tic}")).fetchall()
             if not rows:
                 sr_row = None
                 try:
                     if self.review_db_path:
                         sr_row = cx.execute(
                             "SELECT status, star_class, note FROM overlay.star_reviews WHERE tic=? OR tic=?",
-                            (tic, f"TIC:{clean_tic}")
+                            (clean_tic, f"TIC:{clean_tic}")
                         ).fetchone()
                     if not sr_row:
                         sr_row = cx.execute(
                             "SELECT status, star_class, note FROM star_reviews WHERE tic=? OR tic=?",
-                            (tic, f"TIC:{clean_tic}")
+                            (clean_tic, f"TIC:{clean_tic}")
                         ).fetchone()
                 except Exception:
                     pass
@@ -673,7 +685,7 @@ class SurveyDatabaseAdapter:
                         obs_row = cx.execute('''
                             SELECT camera, ccd, tmag, teff, obs_id, product_filename, data_uri, sector
                             FROM observations WHERE tic=? OR tic=? LIMIT 1
-                        ''', (tic, f"TIC:{clean_tic}")).fetchone()
+                        ''', (clean_tic, f"TIC:{clean_tic}")).fetchone()
                         if obs_row:
                             obs_meta = {
                                 'camera': obs_row[0], 'ccd': obs_row[1], 'tmag': obs_row[2], 'teff': obs_row[3],
@@ -777,11 +789,11 @@ class SurveyDatabaseAdapter:
             hist_cur = cx.execute(f'''
                 SELECT previous_status, new_status, note, reviewer, created_utc
                 FROM {hist_table} WHERE tic=? OR tic=? ORDER BY id DESC LIMIT 20
-            ''', (tic, f"TIC:{clean_tic}"))
+            ''', (clean_tic, f"TIC:{clean_tic}"))
             history = [{'previous_status': h[0], 'new_status': h[1], 'note': h[2],
                         'reviewer': h[3], 'created_utc': h[4]} for h in hist_cur.fetchall()]
 
-            for row in cx.execute("SELECT h.previous_status,h.new_status,h.note,h.reviewer,h.created_utc,h.candidate_id FROM overlay.review_history h JOIN candidates c ON c.id=h.candidate_id WHERE c.tic=? OR c.tic=? ORDER BY h.id DESC LIMIT 20", (tic, f"TIC:{clean_tic}")):
+            for row in cx.execute("SELECT h.previous_status,h.new_status,h.note,h.reviewer,h.created_utc,h.candidate_id FROM overlay.review_history h JOIN candidates c ON c.id=h.candidate_id WHERE c.tic=? OR c.tic=? ORDER BY h.id DESC LIMIT 20", (clean_tic, f"TIC:{clean_tic}")):
                 history.append(dict(previous_status=row[0], new_status=row[1], note=row[2], reviewer=row[3], created_utc=row[4], candidate_id=row[5]))
             history.sort(key=lambda h: h['created_utc'], reverse=True)
 
@@ -791,6 +803,8 @@ class SurveyDatabaseAdapter:
             return {
                 'tic': tic,
                 'clean_tic': clean_tic,
+                'data_kind': self.data_kind,
+                'execution': experiments.read_source_run(self.db_path, self.run_id),
                 'star_status': star_status,
                 'star_class': star_class,
                 'note': star_note,
@@ -911,7 +925,7 @@ class SurveyDatabaseAdapter:
         cx = self.get_connection()
         try:
             clean_tic = sanitize_tic(tic)
-            cands = cx.execute("SELECT id, review_status FROM candidates WHERE tic=? OR tic=?", (tic, f"TIC:{clean_tic}")).fetchall()
+            cands = cx.execute("SELECT id, review_status FROM candidates WHERE tic=? OR tic=?", (clean_tic, f"TIC:{clean_tic}")).fetchall()
             updated = 0
             for cid, orig_st in cands:
                 # Check current effective status
@@ -938,17 +952,19 @@ class SurveyDatabaseAdapter:
 # ---------------------------------------------------------------------------
 
 def render_plot_png(source_file, center_btjd, width_hr, score, depth_ppm, tic,
-                    root_path=None, cache_dir=None, mode="zoom", hours=12.0, other_centers=None, sector=None, product_filename=None, data_uri=None):
+                    root_path=None, cache_dir=None, mode="zoom", hours=12.0, other_centers=None, sector=None, product_filename=None, data_uri=None, synthetic=False, expected_sha256=None):
     """Generate in-memory static PNG plot with on-demand fallback support."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(10, 4.2))
+    if synthetic:
+        fig.suptitle("SYNTHETIC DEMONSTRATION — not astronomical detections", color='darkorange')
 
     try:
         t, f_ppm, good, cadence, src_label = resolve_light_curve_series(
-            tic=tic, sector=sector, product_filename=product_filename, data_uri=data_uri, source_file=source_file, root_path=root_path, cache_dir=cache_dir, allow_download=True
+            tic=tic, sector=sector, product_filename=product_filename, data_uri=data_uri, expected_sha256=expected_sha256, source_file=source_file, root_path=root_path, cache_dir=cache_dir, allow_download=True
         )
     except Exception as e:
         ax.text(0.5, 0.5, f"Light Curve Data Unavailable:\n{str(e)}\n\n(Pass --root <path> or check internet access for MAST streaming)",
@@ -1007,13 +1023,15 @@ def render_plot_png(source_file, center_btjd, width_hr, score, depth_ppm, tic,
 def render_phase_plot_png(source_file, center_btjd, width_hr, score, depth_ppm, tic,
                           epoch_btjd, period_days, is_periodic, odd_even_sigma,
                           period_err=None, epoch_err=None, is_alt=False,
-                          root_path=None, cache_dir=None, sector=None, product_filename=None, data_uri=None):
+                          root_path=None, cache_dir=None, sector=None, product_filename=None, data_uri=None, synthetic=False, expected_sha256=None):
     """Generate in-memory phase-folded static PNG plot."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(10, 4.2))
+    if synthetic:
+        fig.suptitle("SYNTHETIC DEMONSTRATION — not astronomical detections", color='darkorange')
 
     if not is_periodic or period_days <= 0:
         ax.text(0.5, 0.5, "Candidate is not part of a confirmed periodic system.\n(Requires N >= 3 coherent events and acceptable timing residuals)",
@@ -1027,7 +1045,7 @@ def render_phase_plot_png(source_file, center_btjd, width_hr, score, depth_ppm, 
 
     try:
         t, f_ppm, good, cadence, src_label = resolve_light_curve_series(
-            tic=tic, sector=sector, product_filename=product_filename, data_uri=data_uri, source_file=source_file, root_path=root_path, cache_dir=cache_dir, allow_download=True
+            tic=tic, sector=sector, product_filename=product_filename, data_uri=data_uri, expected_sha256=expected_sha256, source_file=source_file, root_path=root_path, cache_dir=cache_dir, allow_download=True
         )
     except Exception as e:
         ax.text(0.5, 0.5, f"Light Curve Data Unavailable:\n{str(e)}",
@@ -1361,10 +1379,12 @@ class AnomalyReviewHandler(BaseHTTPRequestHandler):
 
             try:
                 t, f_ppm, good, cadence, src_label = resolve_light_curve_series(
-                    tic=tic, sector=sector, source_file=source_file, product_filename=obs_prod, data_uri=observation.get("data_uri"),
+                    tic=tic, sector=sector, source_file=source_file, product_filename=obs_prod, data_uri=observation.get("data_uri"), expected_sha256=observation.get("file_sha256"),
                     root_path=self.root_path, cache_dir=self.cache_dir, allow_download=True
                 )
 
+                if detail.get('data_kind') == 'synthetic demonstration':
+                    src_label = 'SYNTHETIC DEMONSTRATION: ' + src_label
                 # Downsample full observation for rapid browser rendering if point count is large
                 # Retains full density around detected event centers!
                 event_centers = [e['center_btjd'] for e in detail['events']]
@@ -1502,7 +1522,7 @@ class AnomalyReviewHandler(BaseHTTPRequestHandler):
 
                 event = next(e for e in self.adapter.get_star_details(tic)['events'] if e['id'] == cid)
                 observation = event.get('observation') or {}
-                identity = dict(sector=event['sector'], product_filename=observation.get('product_filename'), data_uri=observation.get('data_uri'))
+                identity = dict(sector=event['sector'], product_filename=observation.get('product_filename'), data_uri=observation.get('data_uri'), expected_sha256=observation.get('file_sha256'), synthetic=self.adapter.data_kind == 'synthetic demonstration')
                 if mode == "phase":
                     fold_period = period_days if period_days is not None else 0.0
                     is_alt = False
@@ -1809,7 +1829,15 @@ def serve_review_ui(
                 is_read_only=True
             )
             run_id = adhoc_exp["runs"][0]["run_id"]
-            store.update_run(run_id, output_db_path=db_path_resolved, review_db_path=review_db, status="completed")
+            with sqlite3.connect(Path(db_path_resolved).as_uri() + '?mode=ro', uri=True) as source:
+                columns = {r[1] for r in source.execute('PRAGMA table_info(runs)')}
+                key = 'run_id' if 'run_id' in columns else 'id'
+                native_ids = [str(r[0]) for r in source.execute(f'SELECT {key} FROM runs')] if columns else [None]
+            for index, native_id in enumerate(native_ids):
+                entry_id = run_id if index == 0 else store.create_run(adhoc_exp['id'], 'Source: ' + str(native_id))['run_id']
+                overlay = review_db if len(native_ids) == 1 else None
+                store.update_run(entry_id, output_db_path=db_path_resolved, review_db_path=overlay,
+                                 source_run_id=native_id, status='completed')
             store.set_active_selection(adhoc_exp["id"], run_id)
 
     class CustomHandler(AnomalyReviewHandler):
@@ -3152,19 +3180,20 @@ INDEX_HTML = r"""<!DOCTYPE html>
       const cfgP = document.getElementById('provenance-config');
 
       if (!exp) return;
+      const provenance = run?.scientific_provenance || (exp.is_read_only ? {} : exp);
 
       if (hashSpan) {
-        hashSpan.innerText = exp.config_hash ? `Hash: ${exp.config_hash.substring(0, 16)}...` : '';
+        hashSpan.innerText = provenance.config_hash ? `Hash: ${provenance.config_hash.substring(0, 16)}...` : "Hash: unavailable";
       }
       if (objP) {
         objP.textContent = `Objective: ${exp.scientific_objective || exp.description || 'General anomaly exploration.'}`;
       }
       if (cfgP) {
-        let cfg = `Method: ${exp.method || 'fixed_box_2h'} | Threshold T: ${exp.threshold_t ? exp.threshold_t.toFixed(4) : '73.7797'} | Cadence: 120s`;
+        let cfg = `Method: ${provenance.method || (exp.is_read_only ? 'unavailable' : 'fixed_box_2h')} | Threshold T: ${provenance.threshold_t ?? 'unavailable'} | Supported cadence: 120s`;
         if (run) {
           cfg += ` | Output DB: ${run.output_db_path || 'sqlite'}`;
         }
-        cfgP.innerHTML = cfg;
+        cfgP.textContent = cfg;
       }
     }
 
@@ -3275,7 +3304,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
       try {
         const resp = await fetch('/api/stats');
         const data = await resp.json();
-        document.getElementById('app-db-label').innerText = 'DB: ' + (data.db_name || 'Connected');
+        document.getElementById('app-db-label').innerText = (data.data_kind === 'synthetic demonstration' ? 'SYNTHETIC DEMO: ' : 'DB: ') + (data.db_name || 'Connected');
         document.getElementById('tel-obs-count').innerText = AppState.activeRun ? `${AppState.activeRun.completed_obs} / ${AppState.activeRun.total_targets}` : 'Unavailable';
         document.getElementById('tel-stars-count').innerText = (data.stars ? data.stars.total : '—').toLocaleString();
         const dimmings = document.getElementById('tel-dimmings-count');
@@ -3502,6 +3531,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
       document.getElementById('ws-teff-val').innerText = (star.observation && star.observation.teff ? star.observation.teff.toFixed(0) + ' K' : '—');
       document.getElementById('ws-events-count-val').innerText = star.total_events + ' detected';
 
+      const demoBadge = document.getElementById('ws-benchmark-badge');
+      demoBadge.textContent = 'SYNTHETIC DEMONSTRATION';
+      demoBadge.style.display = star.data_kind === 'synthetic demonstration' ? 'inline-block' : 'none';
       // Navigation counter
       const totalInFilter = AppState.filteredStars.length || 1;
       document.getElementById('ws-star-index-label').innerText = `Star ${AppState.currentStarIndex + 1} of ${totalInFilter}`;
@@ -3540,7 +3572,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
         // Tier 1: Matched-Filter Detection Metric
         document.getElementById('prov-score').innerText = `S = ${ev.score.toFixed(2)}`;
-        document.getElementById('prov-kernel-info').innerText = `Matched ${ev.width_hr || 2.0}h box kernel (B1 Detector, T=${AppState.activeExperiment ? AppState.activeExperiment.threshold_t : "unavailable"})`;
+        document.getElementById('prov-kernel-info').innerText = `Matched ${ev.width_hr || 2.0}h box kernel (B1 Detector, T=${star.execution?.threshold_t ?? "unavailable"})`;
 
         // Tier 2: Automated Photometric Verification (5-State Machine)
         const verifClass = ev.scientific_classification || 'not_run';

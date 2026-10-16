@@ -1,5 +1,6 @@
 """Counterexamples from the independent v0.3.0-beta audit."""
 import hashlib
+import json
 import sqlite3
 import threading
 
@@ -25,6 +26,11 @@ def test_same_tic_two_runs_are_isolated_and_source_immutable(tmp_path):
     before = path.read_bytes()
     with pytest.raises(ValueError, match='explicit run_id'):
         SurveyDatabaseAdapter(path)
+    other_source = tmp_path / 'other.sqlite'
+    other_source.write_bytes(before)
+    with pytest.raises(ValueError, match='Scientific database'):
+        SurveyDatabaseAdapter(path, run_id='a', review_db_path=other_source)
+    assert other_source.read_bytes() == before
     a, b = [SurveyDatabaseAdapter(path, run_id=r) for r in ('a', 'b')]
     assert a.query_stars()['stars'][0]['total_events'] == 1
     a.record_event_review(1, 'interesting')
@@ -39,6 +45,17 @@ def test_same_tic_two_runs_are_isolated_and_source_immutable(tmp_path):
     assert detail['events'][0]['scientific_classification'] == 'not_run'
     assert detail['events'][0]['has_shoulder_flare'] is None
     assert detail['events'][0]['coincidence_risk_level'] == 'unknown'
+    store = ExperimentStore(tmp_path / 'exports')
+    for native_id, adapter, expected_status in [('a', a, 'interesting'), ('b', b, 'unreviewed')]:
+        experiment = store.create_experiment(native_id, '', '', ['1'], [1], is_read_only=True)
+        run_id = experiment['runs'][0]['run_id']
+        store.update_run(run_id, output_db_path=str(path), source_run_id=native_id,
+                         review_db_path=adapter.review_db_path)
+        exported = json.loads(store.export_run_catalog(experiment['id'], run_id, 'json')[0])
+        assert len(exported['candidates']) == 1
+        assert exported['candidates'][0]['run_id'] == native_id
+        assert exported['candidates'][0]['human_event_review'] == expected_status
+        assert exported['provenance']['source_run_id'] == native_id
     assert path.read_bytes() == before
 
 
@@ -137,3 +154,21 @@ def test_versioned_coherence_comparison():
     # Masking must not join physically disjoint samples into a coherent run.
     good[341:380] = False
     assert not vetting.verify_event_photometry_v2(time, contiguous, good, **kwargs)['is_verified']
+
+
+def test_partial_failure_recovery_replaces_failed_observation(tmp_path):
+    first, second = tmp_path / 'first.fits', tmp_path / 'second.fits'
+    create_synthetic_fits(str(first), tic=1)
+    create_synthetic_fits(str(second), tic=2)
+    targets = [dict(tic=str(tic), sector=1, filename=f'tess-s0001-{tic}_lc.fits', source_url=str(first)) for tic in (1, 2)]
+    path = str(tmp_path / 'partial.sqlite')
+    kwargs = dict(check_dev_universe=False, threshold_t=1e9, max_workers=1, rate_limit_delay_sec=0)
+    result = streaming.stream_pipeline(targets, path, 'recovery', **kwargs)
+    assert result['n_successful'] == 1 and result['n_failed'] == 1
+    targets[1]['source_url'] = str(second)
+    result = streaming.stream_pipeline(targets, path, 'recovery', **kwargs)
+    assert result['n_successful'] == 1 and result['n_skipped'] == 1 and result['n_failed'] == 0
+    with sqlite3.connect(path) as cx:
+        assert cx.execute('SELECT COUNT(*) FROM observations').fetchone()[0] == 2
+        assert cx.execute("SELECT COUNT(*) FROM observations WHERE status='failed'").fetchone()[0] == 0
+        assert cx.execute('SELECT COUNT(*) FROM failures').fetchone()[0] == 1

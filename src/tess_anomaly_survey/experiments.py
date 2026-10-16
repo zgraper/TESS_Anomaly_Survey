@@ -191,6 +191,21 @@ def validate_and_estimate_targets(
 # ExperimentStore: SQLite Persistence for Experiments and Runs
 # ---------------------------------------------------------------------------
 
+def read_source_run(path, run_id=None):
+    """Read recorded execution metadata; never infer it from a workspace preset."""
+    if not Path(path).is_file():
+        return None
+    try:
+        with sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True) as cx:
+            cx.row_factory = sqlite3.Row
+            cols = {r[1] for r in cx.execute('PRAGMA table_info(runs)')}
+            key = 'run_id' if 'run_id' in cols else 'id'
+            rows = cx.execute(f'SELECT * FROM runs WHERE CAST({key} AS TEXT)=?', (str(run_id),)).fetchall() if run_id else cx.execute('SELECT * FROM runs LIMIT 2').fetchall()
+            return dict(rows[0]) if len(rows) == 1 else None
+    except sqlite3.Error:
+        return None
+
+
 class ExperimentStore:
     """Manages persistent research experiments, survey runs, and historical imports."""
 
@@ -583,7 +598,10 @@ class ExperimentStore:
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
         with self._lock, self._connection() as cx:
             row = cx.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
-            return dict(row) if row else None
+            result = dict(row) if row else None
+        if result:
+            result['scientific_provenance'] = read_source_run(result['output_db_path'], result.get('source_run_id'))
+        return result
 
     def create_run(
         self,
@@ -629,7 +647,7 @@ class ExperimentStore:
             "candidate_count", "verified_count", "throughput_obs_hr",
             "elapsed_sec", "eta_sec", "peak_ram_mb", "avg_cpu_pct",
             "started_utc", "ended_utc", "error_message", "settings_json",
-            "output_db_path", "review_db_path", "total_targets"
+            "output_db_path", "review_db_path", "total_targets", "source_run_id"
         }
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
@@ -788,7 +806,7 @@ class ExperimentStore:
             for key in ('threshold_t', 'config_hash', 'software_version', 'method', 'settings_json', 'b0_hash', 'b1_hash'):
                 provenance[key] = actual_provenance.get(key, 'unavailable')
             provenance['source_run_id'] = actual_provenance.get('run_id', actual_provenance.get('id'))
-        provenance['data_kind'] = 'synthetic demonstration' if exp['id'] == 'exp_demo' or 'synthetic' in exp.get('description', '').lower() else 'observational / consult source provenance'
+        provenance['data_kind'] = 'synthetic demonstration' if run.get('source_run_id') == 'sample_survey_run' or Path(output_db).name == 'sample_survey_review.sqlite' or exp['id'] == 'exp_demo' or 'synthetic' in exp.get('description', '').lower() else 'observational / consult source provenance'
 
         if fmt.lower() == "json":
             payload = {

@@ -129,7 +129,7 @@ The research workspace allows astronomers to define, execute, monitor, and expor
 - **Scientific Identity:** Specify an experiment name, scientific objective, and experimental description.
 - **Target Ingest:** Input target TICs via comma-, space-, or newline-delimited text or paste raw CSV manifests with headers.
 - **Pre-Flight Resource Estimation:** Click *Validate Targets & Estimate* to compute unique target count, total observations across chosen sectors, download volume (MB), and estimated wall-clock runtime. Non-numeric or out-of-range tokens are automatically detected and flagged.
-- **Detector Configuration:** Select the published frozen detector preset ($T = 73.7797$, fixed 2.0h box kernel) with B0/B1 SHA-256 provenance, or define custom experimental parameters.
+- **Detector Configuration:** Select the published frozen detector preset ($T = 73.7797$, fixed 2.0h box kernel) with B0/B1 SHA-256 provenance, or select an experimental threshold. Duration is fixed at two hours; unsupported durations are rejected.
 
 ### B. Background Execution & Real-Time Telemetry
 - Streaming surveys run in a background daemon thread with concurrency locks preventing simultaneous write collisions on the output SQLite database.
@@ -156,8 +156,10 @@ The research workspace allows astronomers to define, execute, monitor, and expor
 | **Experiment Creation & Wizard** | ✅ Fully Implemented | Pre-flight target validation and resource estimation |
 | **Background Streaming Pipeline** | ✅ Fully Implemented | Concurrent execution with progress callbacks and database safety |
 | **Survey Progress & Live Logs** | ✅ Fully Implemented | Telemetry cards, throughput, ETA, and audit log terminal |
-| **Abort & Safe Resume** | ✅ Fully Implemented | Cancellation event handling and target-level survey resumption |
+| **Abort & Safe Resume** | ✅ Fully Implemented | Cancellation event handling and exact-product resumption with identical scientific configuration |
 | **Catalog & Provenance Export** | ✅ Fully Implemented | Standardized CSV and JSON exports with scientific caveats |
 | **Dual-Scope Review & Safe Undo** | ✅ Fully Implemented | Scope isolation between star and event reviews with audit history |
-| **Localhost Security Guard** | ✅ Fully Implemented | Restricts write and execution endpoints strictly to loopback |
+| **Localhost Security Guard** | ✅ Fully Implemented | Validates loopback Host/authority and Origin on reads and writes; browser writes require a CSRF token |
 
+
+The process must remain open while a survey runs. Restart marks unfinished jobs interrupted; resume explicitly. Plotly requires its CDN script. Offline static plots require the `plots` extra and local data. The period view folds recorded event-timing fits; it does not provide a browser periodogram or custom-period fitting. Missing evidence is displayed as unknown/not run. Synthetic demonstration plots and exports are labeled and never acquire substitute MAST observations.
