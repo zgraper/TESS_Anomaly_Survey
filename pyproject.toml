@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tess-anomaly-survey"
+version = "0.3.0b1"
+description = "Research workspace and anomaly candidates from TESS time-series using frozen localized dimming detectors"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{name = "Zane A. Graper"}]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.9",
+    "astropy>=5.0",
+    "astroquery>=0.4.6",
+    "requests>=2.28",
+    "psutil>=5.9"
+]
+keywords = ["astronomy", "TESS", "transit", "anomaly detection", "exoplanets"]
+
+[project.urls]
+Homepage = "https://github.com/zgrap/TESS_Anomaly_Survey"
+Repository = "https://github.com/zgrap/TESS_Anomaly_Survey"
+
+[project.optional-dependencies]
+plots = ["matplotlib>=3.7"]
+transits = ["batman-package>=2.4"]
+test = ["pytest>=7", "matplotlib>=3.7"]
+
+[project.scripts]
+tess-anomaly = "tess_anomaly_survey.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["experiment_b0", "experiment_b1"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

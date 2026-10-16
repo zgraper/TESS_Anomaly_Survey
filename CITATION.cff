@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use this software in research, please cite the software release as below."
+type: software
+title: "TESS Anomaly Survey: Star-Centered Research Workspace & Calibrated Anomaly Detection"
+authors:
+  - family-names: "Graper"
+    given-names: "Zane A."
+    affiliation: "Independent Researcher"
+    orcid: "https://orcid.org/0009-0004-3810-6545"
+version: 0.3.0-beta
+date-released: "2026-10-16"
+license: MIT
+repository-code: "https://github.com/zgrap/TESS_Anomaly_Survey"
+url: "https://github.com/zgrap/TESS_Anomaly_Survey"
+abstract: "A browser-based research workspace and reproducible astronomical pipeline for executing streaming anomaly surveys on NASA TESS light curves, inspecting multi-panel folded and event-zoom flux profiles, and recording non-destructive scientific adjudications."
+keywords:
+  - TESS
+  - light curves
+  - anomaly detection
+  - astronomical software
+  - exoplanets
+  - time-series analysis

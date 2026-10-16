@@ -1,0 +1,37 @@
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.venv/
+venv/
+*.db
+*.db-*
+*.sqlite*
+*.npz
+*.fits
+*.fits.gz
+*.parquet
+*.log
+*.egg-info/
+dist/
+build/
+outputs/
+calibration*.json
+*.png
+*.bak*
+demo_data/
+scratch/
+.DS_Store
+
+# Whitelist portable research publication and arXiv packages
+!research/publication_package/**
+!research/sanitized_supplementary_package/**
+!research/sanitized_supplementary_package.zip
+!research/arxiv_package/**
+
+# Whitelist public example dataset for review UI
+!examples/sample_survey_review.sqlite
+!examples/sample_data/**
+!docs/images/**
+*.reviews.sqlite
+tools/
+research/phase6b/private_adjudication_records/
