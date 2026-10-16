@@ -549,6 +549,8 @@ class SurveyDatabaseAdapter:
 
                 # 3. Verification Filter
                 if verification_filter != 'all':
+                    if verification_filter == 'not_run' and not any(e['scientific_classification'] in (None, 'not_run', 'unknown', 'unavailable') for e in s['events']):
+                        continue
                     if verification_filter == 'dimming' and not any(e['scientific_classification'] == 'verified_localized_dimming' for e in s['events']):
                         continue
                     elif verification_filter == 'variability' and not any(e['scientific_classification'] == 'continuous_stellar_variability' for e in s['events']):
@@ -2262,6 +2264,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <select id="filter-verification" onchange="applyFilters()">
           <option value="all">All Photometric Classes</option>
           <option value="dimming">Verified Localized Dimmings</option>
+            <option value="not_run">Verification not run / unavailable</option>
           <option value="variability">Continuous Variability</option>
           <option value="flare">Flare-Induced Dips</option>
           <option value="artifact">Instrumental Artifacts</option>
@@ -2864,6 +2867,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
           AppState.activeEvent = null;
           AppState.activeLightCurve = null;
           AppState.lightCurveRequestId = (AppState.lightCurveRequestId || 0) + 1;
+          AppState.stars = [];
+          AppState.filteredStars = [];
+          document.getElementById('stars-table-body').replaceChildren();
+          document.getElementById('explore-count-label').textContent = 'Loading selected run…';
+          document.getElementById('app-db-label').textContent = 'Loading selected run…';
           updateWorkspaceUI();
           switchView('explore');
           await loadStats();
@@ -3476,6 +3484,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
         if (requestId !== AppState.starRequestId || runId !== AppState.activeRun?.run_id) return;
         if (!resp.ok) throw new Error(data.error || 'Star unavailable');
         AppState.activeStar = data;
+        if (AppState.currentView === 'workspace') history.replaceState(null, '', `#view=workspace&tic=${encodeURIComponent(tic)}`);
 
         // Pick active event
         if (preferredEventId) {
