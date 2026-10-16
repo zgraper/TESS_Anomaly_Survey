@@ -2998,6 +2998,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
           sectors: checkedSectors,
           workers: workers,
           threshold_t: threshold_t,
+          config_preset: AppState.selectedPreset === 'custom' ? 'experimental_custom' : 'frozen_fixed_box_2h',
           duration_hr: duration_hours,
           launch_immediately: autolaunch
         };

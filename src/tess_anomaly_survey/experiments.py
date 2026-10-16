@@ -40,7 +40,7 @@ DETECTOR_PRESETS = {
         "duration_hr": FROZEN_DURATION_HR,
         "method": FROZEN_METHOD,
         "is_frozen": True,
-        "calibration_source": "Phase 2 Empirical Null Simulation (P = 0.01 alert rate)",
+        "calibration_source": "Inherited empirical cutoff; not a catalog false-alarm probability",
         "b0_sha256": core.ORIGINAL_B0_SHA256,
         "b1_sha256": core.ORIGINAL_B1_SHA256,
         "limitations": (
