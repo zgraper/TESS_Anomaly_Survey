@@ -2867,6 +2867,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
           AppState.activeEvent = null;
           AppState.activeLightCurve = null;
           AppState.lightCurveRequestId = (AppState.lightCurveRequestId || 0) + 1;
+          updateWorkspaceUI();
+          switchView('explore');
           await loadStats();
           await fetchStars();
           checkRunStatus();
@@ -3301,9 +3303,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
     // Load Survey Stats
     async function loadStats() {
+      const runId = AppState.activeRun?.run_id;
       try {
         const resp = await fetch('/api/stats');
         const data = await resp.json();
+        if (runId !== AppState.activeRun?.run_id) return;
         document.getElementById('app-db-label').innerText = (data.data_kind === 'synthetic demonstration' ? 'SYNTHETIC DEMO: ' : 'DB: ') + (data.db_name || 'Connected');
         document.getElementById('tel-obs-count').innerText = AppState.activeRun ? `${AppState.activeRun.completed_obs} / ${AppState.activeRun.total_targets}` : 'Unavailable';
         document.getElementById('tel-stars-count').innerText = (data.stars ? data.stars.total : '—').toLocaleString();
@@ -3316,6 +3320,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
     // Fetch Stars for Explore Page
     async function fetchStars() {
+      const runId = AppState.activeRun?.run_id;
+      const requestId = (AppState.catalogRequestId || 0) + 1;
+      AppState.catalogRequestId = requestId;
       const status = document.getElementById('filter-status').value;
       const verif = document.getElementById('filter-verification').value;
       const sysType = document.getElementById('filter-system').value;
@@ -3326,6 +3333,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
       try {
         const resp = await fetch(url);
         const data = await resp.json();
+        if (runId !== AppState.activeRun?.run_id || requestId !== AppState.catalogRequestId) return;
         AppState.stars = data.stars || [];
         AppState.filteredStars = AppState.stars;
         renderStarsTable(data);
@@ -3461,9 +3469,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
     }
 
     async function loadStarDetails(tic, preferredEventId = null) {
+      const requestId = (AppState.starRequestId || 0) + 1;
+      AppState.starRequestId = requestId;
+      const runId = AppState.activeRun?.run_id;
       try {
         const resp = await fetch(`/api/star/${encodeURIComponent(tic)}`);
         const data = await resp.json();
+        if (requestId !== AppState.starRequestId || runId !== AppState.activeRun?.run_id) return;
+        if (!resp.ok) throw new Error(data.error || 'Star unavailable');
         AppState.activeStar = data;
 
         // Pick active event
@@ -3520,6 +3533,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
         document.getElementById('prov-provisional-desc').innerText = 'Select a star and candidate event to inspect scientific evidence.';
         document.getElementById('ws-audit-history-list').innerHTML = '<span>No target star selected.</span>';
         document.getElementById('card-phase-fold').style.display = 'none';
+        for (const id of ['plot-full-container', 'plot-zoom-container', 'plot-phase-container']) {
+          const container = document.getElementById(id);
+          if (typeof Plotly !== 'undefined') Plotly.purge(container);
+          container.textContent = 'Select a target star.';
+        }
         return;
       }
 
