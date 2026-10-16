@@ -781,6 +781,10 @@ class SurveyDatabaseAdapter:
             history = [{'previous_status': h[0], 'new_status': h[1], 'note': h[2],
                         'reviewer': h[3], 'created_utc': h[4]} for h in hist_cur.fetchall()]
 
+            for row in cx.execute("SELECT h.previous_status,h.new_status,h.note,h.reviewer,h.created_utc,h.candidate_id FROM overlay.review_history h JOIN candidates c ON c.id=h.candidate_id WHERE c.tic=? OR c.tic=? ORDER BY h.id DESC LIMIT 20", (tic, f"TIC:{clean_tic}")):
+                history.append(dict(previous_status=row[0], new_status=row[1], note=row[2], reviewer=row[3], created_utc=row[4], candidate_id=row[5]))
+            history.sort(key=lambda h: h['created_utc'], reverse=True)
+
             total_events = len(events)
             reviewed_events = sum(1 for e in events if e['review_status'] != 'unreviewed')
 
@@ -1353,7 +1357,7 @@ class AnomalyReviewHandler(BaseHTTPRequestHandler):
             sector = event['sector'] if event else observation.get('sector')
             source_file = event['source_file'] if event else None
             obs_prod = observation.get('product_filename')
-            detail['events'] = [e for e in selected if (e.get('observation') or {}).get('id') == observation.get('id')] if observation else selected[:1]
+            detail['events'] = [e for e in detail['events'] if (e.get('observation') or {}).get('id') == observation.get('id')] if observation else selected[:1]
 
             try:
                 t, f_ppm, good, cadence, src_label = resolve_light_curve_series(
@@ -1797,15 +1801,15 @@ def serve_review_ui(
                 break
         if not found_run:
             adhoc_exp = store.create_experiment(
-                name=f"Survey: {Path(db_path).name}",
-                description=f"Ad-hoc research workspace for {Path(db_path).name}",
+                name=("Synthetic Demonstration" if Path(db_path).name == 'sample_survey_review.sqlite' else f"Survey: {Path(db_path).name}"),
+                description=("Synthetic demonstration; not real astronomical detections" if Path(db_path).name == 'sample_survey_review.sqlite' else f"Ad-hoc research workspace for {Path(db_path).name}"),
                 scientific_objective="Exploratory candidate review",
                 targets=[],
                 sectors=[],
                 is_read_only=True
             )
             run_id = adhoc_exp["runs"][0]["run_id"]
-            store.update_run(run_id, output_db_path=db_path_resolved, review_db_path=review_db)
+            store.update_run(run_id, output_db_path=db_path_resolved, review_db_path=review_db, status="completed")
             store.set_active_selection(adhoc_exp["id"], run_id)
 
     class CustomHandler(AnomalyReviewHandler):
@@ -2181,6 +2185,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
       <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; min-width:0; max-width:100%;">
         <span style="font-size:11px; font-weight:700; color:var(--text-secondary); letter-spacing:0.5px;">EXPERIMENT:</span>
         <select id="sel-experiment" onchange="onSwitchExperiment(this.value)" style="background:var(--bg-card); color:#fff; border:1px solid var(--border); border-radius:6px; padding:4px 10px; font-size:12px; font-weight:600; min-width:180px; max-width:280px;"></select>
+        <select id="sel-run" aria-label="Run" onchange="onSwitchExperiment(AppState.activeExperiment.id, this.value)" style="max-width:280px; background:var(--bg-card); color:#fff;"></select>
         <span id="badge-exp-mode" class="badge unreviewed">CONNECTING</span>
         <button class="btn btn-sm" onclick="openNewExperimentModal()" style="background:var(--accent); color:#0b0f17; font-weight:700; padding:4px 10px; font-size:11px; border:none; border-radius:6px; cursor:pointer;">+ New Experiment</button>
       </div>
@@ -2373,7 +2378,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <span class="prov-title">1. Matched-Filter Detector Metric</span>
             <div style="display:flex; justify-content:space-between; font-size:12px;">
               <span>Score: <b id="prov-score" style="color:#fbbf24; font-family:monospace;">—</b></span>
-              <span style="color:var(--text-muted); font-family:monospace;">Threshold T = 73.78</span>
+              <span style="color:var(--text-muted); font-family:monospace;">Execution threshold shown below</span>
             </div>
             <span id="prov-kernel-info" style="font-size:11px; color:var(--text-secondary);">Select a target star to evaluate detector significance.</span>
           </div>
@@ -2782,6 +2787,15 @@ INDEX_HTML = r"""<!DOCTYPE html>
     }
 
     function updateExperimentBadge() {
+      const runs = document.getElementById('sel-run');
+      runs.replaceChildren();
+      for (const run of (AppState.activeExperiment?.runs || [])) {
+        const option = document.createElement('option');
+        option.value = run.run_id;
+        option.textContent = run.run_label || run.run_id;
+        option.selected = run.run_id === AppState.activeRun?.run_id;
+        runs.appendChild(option);
+      }
       const badge = document.getElementById('badge-exp-mode');
       const exp = AppState.activeExperiment;
       if (!badge) return;
@@ -2801,16 +2815,16 @@ INDEX_HTML = r"""<!DOCTYPE html>
       }
       const expLabel = document.getElementById('explore-active-run-label');
       if (expLabel) {
-        expLabel.innerText = `Exp: ${exp.name}` + (AppState.activeRun ? ` (Run #${AppState.activeRun.run_id})` : '');
+        expLabel.innerText = `Exp: ${exp.name}` + (AppState.activeRun ? ` (${AppState.activeRun.run_label || AppState.activeRun.run_id})` : '');
       }
     }
 
-    async function onSwitchExperiment(expId) {
+    async function onSwitchExperiment(expId, runId = null) {
       try {
         const resp = await fetch('/api/experiments/active', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ experiment_id: expId })
+          body: JSON.stringify({ experiment_id: expId, run_id: runId })
         });
         const res = await resp.json();
         if (res.success) {
@@ -2971,7 +2985,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
         if (res.success) {
           showToast(`Created experiment: ${name}`);
           closeNewExperimentModal();
+          AppState.activeStar = null;
+          AppState.activeEvent = null;
+          AppState.activeLightCurve = null;
+          AppState.lightCurveRequestId = (AppState.lightCurveRequestId || 0) + 1;
           await loadExperiments();
+          await loadStats();
+          await fetchStars();
           if (autolaunch && res.run) {
             switchView('progress');
             checkRunStatus();
@@ -3137,7 +3157,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
         hashSpan.innerText = exp.config_hash ? `Hash: ${exp.config_hash.substring(0, 16)}...` : '';
       }
       if (objP) {
-        objP.innerHTML = `<strong>Objective:</strong> ${exp.objective || exp.description || 'General anomaly exploration.'}`;
+        objP.textContent = `Objective: ${exp.scientific_objective || exp.description || 'General anomaly exploration.'}`;
       }
       if (cfgP) {
         let cfg = `Method: ${exp.method || 'fixed_box_2h'} | Threshold T: ${exp.threshold_t ? exp.threshold_t.toFixed(4) : '73.7797'} | Cadence: 120s`;
@@ -3196,14 +3216,24 @@ INDEX_HTML = r"""<!DOCTYPE html>
       }
     }
 
-    function exportCatalog(format) {
-      let url = '';
-      if (AppState.activeRun && AppState.activeRun.run_id) {
-        url = `/api/runs/${AppState.activeRun.run_id}/export?format=${format}`;
-      } else {
-        url = `/api/export?format=${format}`;
+    async function exportCatalog(format) {
+      if (!AppState.activeRun) return;
+      try {
+        const response = await fetch(`/api/runs/${AppState.activeRun.run_id}/export?format=${format}`);
+        if (!response.ok) throw new Error(await response.text());
+        const blob = await response.blob();
+        const href = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = href;
+        link.download = `tess_catalog_${AppState.activeRun.run_id}.${format}`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(href), 30000);
+        showToast(`Exported ${format.toUpperCase()} for ${AppState.activeRun.run_label || AppState.activeRun.run_id}`);
+      } catch (error) {
+        alert('Export failed: ' + error.message);
       }
-      window.open(url, '_blank');
     }
 
     // Load initial data
@@ -3231,7 +3261,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
       const container = document.getElementById('toast-container');
       const toast = document.createElement('div');
       toast.className = 'toast';
-      toast.innerHTML = '✓ ' + msg;
+      toast.textContent = '✓ ' + msg;
       container.appendChild(toast);
       setTimeout(() => {
         toast.style.opacity = '0';
@@ -3246,9 +3276,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
         const resp = await fetch('/api/stats');
         const data = await resp.json();
         document.getElementById('app-db-label').innerText = 'DB: ' + (data.db_name || 'Connected');
-        document.getElementById('tel-obs-count').innerText = (data.events ? data.events.total : '—').toLocaleString();
+        document.getElementById('tel-obs-count').innerText = AppState.activeRun ? `${AppState.activeRun.completed_obs} / ${AppState.activeRun.total_targets}` : 'Unavailable';
         document.getElementById('tel-stars-count').innerText = (data.stars ? data.stars.total : '—').toLocaleString();
-        document.getElementById('tel-dimmings-count').innerText = (data.verifications && data.verifications.verified_localized_dimming ? data.verifications.verified_localized_dimming : '—').toLocaleString();
+        const dimmings = document.getElementById('tel-dimmings-count');
+        if (dimmings) dimmings.innerText = (data.verifications?.verified_localized_dimming || 0).toLocaleString();
       } catch (e) {
         console.error("Failed to load stats", e);
       }
@@ -3560,7 +3591,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
           provClassElem.style.color = '#60a5fa';
           provDescElem.innerText = 'Continuous periodic or quasi-periodic stellar pulsation / modulation.';
         } else {
-          provClassElem.innerText = 'Isolated Single-Dip Candidate';
+          provClassElem.innerText = star.total_events > 1 ? 'Multiple events; period unavailable' : 'Isolated Single-Dip Candidate';
           provClassElem.style.color = '#34d399';
           provDescElem.innerText = 'Empirical localized negative excursion. Requires multi-sector or radial-velocity confirmation.';
         }

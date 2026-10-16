@@ -57,7 +57,7 @@ DETECTOR_PRESETS = {
         "calibration_source": "User-specified experimental parameters",
         "b0_sha256": core.ORIGINAL_B0_SHA256,
         "b1_sha256": core.ORIGINAL_B1_SHA256,
-        "limitations": "Experimental configuration â€” Not part of the published frozen methodology."
+        "limitations": "Experimental configuration — Not part of the published frozen methodology."
     }
 }
 
@@ -284,8 +284,8 @@ class ExperimentStore:
         historical_definitions = [
             {
                 "id": "exp_phase7_development",
-                "name": "Phase 7 Development Survey (Sectors 1â€“10)",
-                "description": "Empirical survey across 9,753 observations in Sectors 1â€“10.",
+                "name": "Phase 7 Development Survey (Sectors 1–10)",
+                "description": "Empirical survey across 9,753 observations in Sectors 1–10.",
                 "scientific_objective": (
                     "Empirical localized dimming survey using frozen fixed_box_2h detector "
                     "with cross-camera and cross-star coincidence auditing."
@@ -336,7 +336,7 @@ class ExperimentStore:
             {
                 "id": "exp_streaming_pilot",
                 "name": "Phase 7 Streaming Pilot Survey",
-                "description": "Pilot streaming run (Sectors 1â€“10) validating zero-disk architecture.",
+                "description": "Pilot streaming run (Sectors 1–10) validating zero-disk architecture.",
                 "scientific_objective": "Pilot validation of streaming pipeline and worker performance.",
                 "run_id": "run_streaming_pilot",
                 "candidate_paths": [
