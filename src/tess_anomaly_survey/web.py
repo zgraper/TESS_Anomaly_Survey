@@ -60,11 +60,8 @@ def get_default_cache_dir() -> Path:
 def sanitize_tic(tic: Any) -> str:
     """Standardize TIC identifier to clean string."""
     raw = str(tic).strip()
-    if raw.startswith("TIC:"):
-        return raw[4:].strip()
-    if raw.startswith("TIC"):
-        return raw[3:].strip()
-    return raw
+    match = re.fullmatch(r"(?:TIC:?\s*)?(\d+)", raw, flags=re.IGNORECASE)
+    return match.group(1) if match else raw
 
 
 def resolve_light_curve_series(
@@ -658,11 +655,11 @@ class SurveyDatabaseAdapter:
                 {sys_joins}
                 {ov_cand_join}
                 {ov_star_join}
-                WHERE c.tic=? OR c.tic=?
+                WHERE c.tic IN (?,?,?)
                 ORDER BY c.score DESC
             '''
 
-            rows = cx.execute(sql, (clean_tic, f"TIC:{clean_tic}")).fetchall()
+            rows = cx.execute(sql, (tic, clean_tic, f"TIC:{clean_tic}")).fetchall()
             if not rows:
                 sr_row = None
                 try:
