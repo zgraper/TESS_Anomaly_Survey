@@ -58,6 +58,45 @@ def test_same_tic_two_runs_are_isolated_and_source_immutable(tmp_path):
         assert exported['provenance']['source_run_id'] == native_id
     assert path.read_bytes() == before
 
+    # Legacy CLI exports must use the same scoped overlays without opening the
+    # scientific database writable or silently merging runs.
+    import csv
+    from types import SimpleNamespace
+    from tess_anomaly_survey.cli import do_export
+    output = tmp_path / 'reviewed.csv'
+    args = SimpleNamespace(db=str(path), run_id='a', status='interesting',
+                           output=str(output), limit=100, max_per_star=0)
+    do_export(args)
+    with output.open(newline='', encoding='utf-8') as fh:
+        rows = list(csv.DictReader(fh))
+    assert len(rows) == 1 and rows[0]['run_id'] == 'a'
+    assert rows[0]['review_status'] == 'interesting'
+    args.run_id = None
+    with pytest.raises(ValueError, match='explicit run_id'):
+        do_export(args)
+    assert path.read_bytes() == before
+
+
+def test_historical_telemetry_is_native_run_scoped(tmp_path, monkeypatch):
+    path = tmp_path / 'streaming_pilot.sqlite'
+    with sqlite3.connect(path) as cx:
+        cx.executescript('''
+            CREATE TABLE runs(run_id TEXT);
+            CREATE TABLE candidates(run_id TEXT,scientific_classification TEXT);
+            CREATE TABLE observations(run_id TEXT,status TEXT);
+            INSERT INTO runs VALUES ('a'),('b');
+            INSERT INTO candidates VALUES ('a','verified_localized_dimming'),('b','not_run'),('b','not_run');
+            INSERT INTO observations VALUES ('a','completed'),('b','completed'),('b','no_anomalies'),('b','failed');
+        ''')
+    before = path.read_bytes()
+    monkeypatch.setenv('TESS_SURVEY_DIR', str(tmp_path))
+    store = ExperimentStore(tmp_path / 'workspace')
+    runs = {r['source_run_id']: r for r in store.get_experiment('exp_streaming_pilot')['runs']}
+    assert (runs['a']['completed_obs'], runs['a']['candidate_count'], runs['a']['verified_count']) == (1, 1, 1)
+    assert (runs['b']['completed_obs'], runs['b']['candidate_count'], runs['b']['verified_count']) == (2, 2, 0)
+    assert runs['b']['total_targets'] == 3 and runs['b']['failed_obs'] == 1
+    assert path.read_bytes() == before
+
 
 def test_launch_rejects_readonly_and_foreign_runs_before_output(tmp_path):
     store = ExperimentStore(tmp_path / 'workspace')

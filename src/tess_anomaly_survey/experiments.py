@@ -366,7 +366,7 @@ class ExperimentStore:
             {
                 "id": "exp_sample_demonstration",
                 "name": "Public Demonstration Survey",
-                "description": "Self-contained public benchmark dataset with ground-truth astrophysical and control targets.",
+                "description": "Self-contained synthetic demonstration with illustrative signals and control targets; not astrophysical ground truth.",
                 "scientific_objective": (
                     "Demonstration survey featuring an illustrative synthetic eclipsing binary benchmark (TIC 39018208, simulated P = 2.41824 d), "
                     "localized dimming candidate (TIC 73834), pulsator (TIC 60232), flare artifact (TIC 141944), and quiet control star (TIC 999001)."
@@ -466,6 +466,23 @@ class ExperimentStore:
                         entry['run_label'] = 'Historical: ' + native_id
                         entry['review_db_path'] = str(self.workspace_dir / 'overlays' / (entry['run_id'] + '.reviews.sqlite'))
                         entry['candidate_count'] = source.execute("SELECT COUNT(*) FROM candidates WHERE CAST(run_id AS TEXT)=?", (native_id,)).fetchone()[0]
+                        cand_cols = {r[1] for r in source.execute('PRAGMA table_info(candidates)')}
+                        entry['verified_count'] = source.execute("SELECT COUNT(*) FROM candidates WHERE CAST(run_id AS TEXT)=? AND scientific_classification='verified_localized_dimming'", (native_id,)).fetchone()[0] if 'scientific_classification' in cand_cols else 0
+                        # Historical totals describe recorded observations for this run,
+                        # never the nominal size of a different cohort or native run.
+                        entry.update(total_targets=0, processed_targets=0, completed_obs=0,
+                                     failed_obs=0, throughput_obs_hr=0.0)
+                        if 'observations' in tables:
+                            obs_cols = {r[1] for r in source.execute('PRAGMA table_info(observations)')}
+                            if {'run_id', 'status'} <= obs_cols:
+                                counts = dict(source.execute('SELECT status,COUNT(*) FROM observations WHERE CAST(run_id AS TEXT)=? GROUP BY status', (native_id,)))
+                                entry['completed_obs'] = sum(counts.get(s, 0) for s in ('completed', 'no_anomalies'))
+                                entry['failed_obs'] = counts.get('failed', 0)
+                                entry['total_targets'] = sum(counts.values())
+                                entry['processed_targets'] = entry['completed_obs'] + entry['failed_obs']
+                        elif 'processed_files' in tables:
+                            entry['completed_obs'] = source.execute('SELECT COUNT(*) FROM processed_files WHERE CAST(run_id AS TEXT)=?', (native_id,)).fetchone()[0]
+                            entry['total_targets'] = entry['processed_targets'] = entry['completed_obs']
                         keys = list(entry)
                         cx.execute('INSERT OR REPLACE INTO runs (' + ','.join(keys) + ') VALUES (' + ','.join('?' for _ in keys) + ')', [entry[k] for k in keys])
 

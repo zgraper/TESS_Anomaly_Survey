@@ -230,7 +230,9 @@ def do_stats(args):
 
 def do_export(args):
     from . import ranking
-    cx = db.connect(args.db)
+    from .web import SurveyDatabaseAdapter
+    adapter = SurveyDatabaseAdapter(args.db, run_id=args.run_id)
+    cx = adapter.get_connection()
     group_by = getattr(args, 'group_by', 'none')
     if getattr(args, 'group_by_star', False):
         group_by = 'star'
@@ -257,14 +259,14 @@ def do_export(args):
         print(f'Exported {len(systems)} candidate systems to {args.output} (grouped by periodic system)')
         return
 
-    cond = 'WHERE run_id=?' if args.run_id else ''
+    cond = 'WHERE c.run_id=?' if args.run_id else ''
     vals = [args.run_id] if args.run_id else []
     if args.status:
-        cond += (' AND ' if cond else ' WHERE ') + 'review_status=?'
+        cond += (' AND ' if cond else ' WHERE ') + 'COALESCE(o.status,c.review_status)=?'
         vals.append(args.status)
-    cur = cx.execute('''SELECT id,run_id,tic,sector,source_file,center_btjd,score,width_hr,
-                     depth_ppm,n_support_windows,review_status,note
-                     FROM candidates ''' + cond + ' ORDER BY score DESC', vals)
+    cur = cx.execute('''SELECT c.id,c.run_id,c.tic,c.sector,c.source_file,c.center_btjd,c.score,c.width_hr,
+                     c.depth_ppm,c.n_support_windows,COALESCE(o.status,c.review_status),COALESCE(o.note,c.note)
+                     FROM candidates c LEFT JOIN overlay.candidate_review_overlay o ON o.candidate_id=c.id ''' + cond + ' ORDER BY c.score DESC', vals)
     raw_cands = []
     for r in cur:
         raw_cands.append({

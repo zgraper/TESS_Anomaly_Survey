@@ -21,7 +21,7 @@ TESS Anomaly Survey `v0.3.0-beta` introduces a complete browser-based astronomic
 
 1. **Star-Centered Research Workspace (`tess-anomaly review-ui`)**
    - **Explore Stars Catalog**: Star-aggregated triage view (1 row per target star by default) expandable into individual candidate events, with comprehensive filtering (unreviewed, interesting, false alarm, multi-event, period-folded).
-   - **Interactive Investigation Workspace**: Synchronized full-duration observation panel, localized event-zoom light curve, and phase folding with automated Lomb-Scargle periodogram analysis and manual period overrides.
+   - **Interactive Investigation Workspace**: Synchronized observation and event-zoom panels, with folding at recorded periods derived from candidate-event timings. Browser Lomb–Scargle analysis and manual period overrides are not implemented.
    - **Non-Destructive Review Overlays**: Scientific candidate classifications (e.g., `interesting`, `known_transit`, `stellar_variability`, `instrumental_artifact`) and observational notes are persisted in companion `.reviews.sqlite` databases, ensuring historical research databases remain strictly immutable.
    - **Bundled Public Demo**: Ready out-of-the-box with a 4-star demonstration survey (`examples/sample_survey_review.sqlite`) and synthetic light curves (`examples/sample_data/`).
 
@@ -34,7 +34,7 @@ TESS Anomaly Survey `v0.3.0-beta` introduces a complete browser-based astronomic
    - **Anti-DNS Rebinding**: Strict `Host` header enforcement rejecting requests not directed to `127.0.0.1` or `localhost`.
    - **Anti-CSRF & Origin Verification**: Mutating `POST` endpoints enforce origin validation to protect researchers running local servers.
    - **Path Traversal Defenses**: Strict validation on light-curve file paths and output directory destinations.
-   - **Cross-Platform Compatibility**: Full testing across Windows, Linux, and macOS, with ASCII-safe console logging to eliminate encoding crashes on Windows PowerShell/CMD.
+   - **Platform Validation**: The correction acceptance run used Windows and Python 3.14.4. Linux/macOS and other Python versions remain unverified. Console logging uses ASCII-safe formatting.
 
 4. **Scientific Integrity & Frozen Detector Preservation**
    - Detector implementations and baseline parameters ($T = 73.77965536097444$ for 2-hour localized box filtering) remain byte-frozen and verified against original SHA-256 hashes.

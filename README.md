@@ -76,8 +76,8 @@ http://127.0.0.1:8000
 1. **Explore Stars**: Browse the bundled target stars. Filter by review status or search for target `TIC 39018208`.
 2. **Expand Events**: Click on `TIC 39018208` to expand its detected candidate events.
 3. **Inspect Light Curves**: Click **Inspect** to load the multi-panel light curve. Use mouse drag/scroll to pan and zoom on the localized event.
-4. **Phase Folding**: Toggle **Folded Light Curve** to test automated Lomb-Scargle period finding or enter a trial period manually.
-5. **Classify Candidate**: Select an astrophysical classification (e.g., `interesting`, `stellar_variability`, `instrumental_artifact`), add notes, and save. Notes and tags are stored non-destructively in `examples/sample_survey_review.reviews.sqlite`, leaving the primary survey database completely untouched.
+4. **Phase Folding**: Inspect the folded panel when a period is recorded. Period estimates use candidate-event timings; the browser has no manual period control or Lomb–Scargle search.
+5. **Classify Candidate**: Select a review classification (e.g., `interesting`, `stellar_variability`, `instrumental_artifact`), add notes, and save. Notes and tags are stored in the selected run's separate review overlay, leaving the primary survey database untouched.
 
 ---
 

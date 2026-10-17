@@ -2415,7 +2415,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <span class="prov-title">2. Automated Photometric Verification (5-State Machine)</span>
             <div id="prov-verif-class" style="font-weight:700; color:#34d399; font-size:12px;">—</div>
             <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--text-secondary); margin-top:2px;">
-              <span>True Depth: <b id="prov-depth" style="color:#fff;">—</b></span>
+              <span>Depth measurements: <b id="prov-depth" style="color:#fff;">—</b></span>
               <span>Flare Shoulder: <b id="prov-flare" style="color:#34d399;">—</b></span>
             </div>
             <span id="prov-verif-desc" style="font-size:11px; color:var(--text-secondary); margin-top:2px;">Awaiting target selection.</span>
