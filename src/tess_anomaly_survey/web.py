@@ -3060,9 +3060,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
     async function pollProgressOnce() {
       if (!AppState.activeRun) return;
+      const runId = AppState.activeRun.run_id;
       try {
-        const resp = await fetch(`/api/runs/${AppState.activeRun.run_id}/progress`);
+        const resp = await fetch(`/api/runs/${runId}/progress`);
         const data = await resp.json();
+        if (runId !== AppState.activeRun?.run_id) return;
         if (data.run) {
           AppState.activeRun = data.run;
           updateProgressUI(data);
