@@ -1,4 +1,6 @@
-# TESS Anomaly Survey (`v0.3.0-beta`)
+# TESS Anomaly Survey (`0.3.0b2`)
+
+Release candidate: **`v0.3.0-beta.2`** (Python package/application version `0.3.0b2`). Prepared locally for author approval; publication is pending. The original `v0.3.0-beta` tag is preserved. See [release notes](RELEASE_NOTES.md) and the [R01–R20 correction register](docs/AUDIT_CORRECTIONS.md).
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -179,7 +181,7 @@ If you use TESS Anomaly Survey in your research, please cite the software releas
 @software{graper2026tess,
   author       = {Zane A. Graper},
   title        = {TESS Anomaly Survey: Star-Centered Research Workspace and Calibrated Anomaly Detection},
-  version      = {0.3.0-beta},
+  version      = {0.3.0b2},
   year         = {2026},
   url          = {https://github.com/zgrap/TESS_Anomaly_Survey},
   note         = {Software release candidate; methodology manuscript in author review}

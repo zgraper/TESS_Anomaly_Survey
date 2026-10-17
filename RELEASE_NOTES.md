@@ -1,4 +1,6 @@
-# Local audit correction candidate (unpublished)
+# 0.3.0b2 — Audit-corrected bounded beta
+
+Proposed tag: `v0.3.0-beta.2`. Prepared 2026-10-16 from verified correction commit `ac15694`; publication awaits final author authorization. Package metadata, application version and citation use the canonical Python prerelease version `0.3.0b2`.
 
 - Read-only scientific source access with run-bound review overlays and launch guards.
 - Exact archive product resolution, FITS target/sector/cadence checks, isolated caches and scoped exports.
@@ -8,6 +10,10 @@
 - Numeric MAST Products identifiers, dependency-free CSV export, same-origin/CSRF protection, truthful evidence states and documentation.
 
 This branch is not published and does not replace `v0.3.0-beta`. See [audit corrections](docs/AUDIT_CORRECTIONS.md) for acceptance results and remaining limitations.
+
+All 17 fixes and three documented restrictions from R01–R20 are included. The correction suite passed 108 tests with one expected private-catalog module skip; release preparation changes only version/publication metadata and receives an installed-package workflow smoke test.
+
+Supported scope: fixed two-hour detection with explicit experimental custom thresholds; phase folding at recorded event-timing periods; Windows/Python 3.14.4 acceptance. Linux/macOS, other Python versions, physical tablets and long workloads remain unverified. Interactive plots depend on CDN Plotly; offline static plotting requires local data and the optional plotting dependencies. `coherence_v2` is separately versioned post-detection logic, with no new recovery-rate or false-alarm claims. Historical classifications, datasets, frozen B0/B1 and threshold remain unchanged.
 
 ---
 

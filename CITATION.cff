@@ -7,7 +7,7 @@ authors:
     given-names: "Zane A."
     affiliation: "Independent Researcher"
     orcid: "https://orcid.org/0009-0004-3810-6545"
-version: 0.3.0-beta
+version: 0.3.0b2
 date-released: "2026-10-16"
 license: MIT
 repository-code: "https://github.com/zgrap/TESS_Anomaly_Survey"
