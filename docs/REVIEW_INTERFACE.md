@@ -14,8 +14,8 @@ The application runs locally on standard Python (3.10–3.14) with zero remote w
 
 ```bash
 # Clone the repository
-git clone https://github.com/zgraper/tess-anomaly-survey.git
-cd tess-anomaly-survey
+git clone https://github.com/zgraper/TESS_Anomaly_Survey.git
+cd TESS_Anomaly_Survey
 
 # Create and activate a virtual environment
 # Windows (PowerShell):

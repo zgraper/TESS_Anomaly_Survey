@@ -1,6 +1,6 @@
 # 0.3.0b2 — Audit-corrected bounded beta
 
-Proposed tag: `v0.3.0-beta.2`. Prepared 2026-10-16 from verified correction commit `ac15694`; publication awaits final author authorization. Package metadata, application version and citation use the canonical Python prerelease version `0.3.0b2`.
+Tag: `v0.3.0-beta.2`. Prepared 2026-10-16 from verified correction commit `ac15694`; publication authorized 2026-11-03 for `zgraper/TESS_Anomaly_Survey`. Package metadata, application version and citation use the canonical Python prerelease version `0.3.0b2`.
 
 - Read-only scientific source access with run-bound review overlays and launch guards.
 - Exact archive product resolution, FITS target/sector/cadence checks, isolated caches and scoped exports.
@@ -9,7 +9,7 @@ Proposed tag: `v0.3.0-beta.2`. Prepared 2026-10-16 from verified correction comm
 - Separate `coherence_v2` post-detection gate; historical v1 classifications and frozen B0/B1 are preserved.
 - Numeric MAST Products identifiers, dependency-free CSV export, same-origin/CSRF protection, truthful evidence states and documentation.
 
-This branch is not published and does not replace `v0.3.0-beta`. See [audit corrections](docs/AUDIT_CORRECTIONS.md) for acceptance results and remaining limitations.
+This prerelease preserves the original `v0.3.0-beta` tag. See [audit corrections](docs/AUDIT_CORRECTIONS.md) for acceptance results and remaining limitations.
 
 All 17 fixes and three documented restrictions from R01–R20 are included. The correction suite passed 108 tests with one expected private-catalog module skip; release preparation changes only version/publication metadata and receives an installed-package workflow smoke test.
 

@@ -1,6 +1,6 @@
 # TESS Anomaly Survey (`0.3.0b2`)
 
-Release candidate: **`v0.3.0-beta.2`** (Python package/application version `0.3.0b2`). Prepared locally for author approval; publication is pending. The original `v0.3.0-beta` tag is preserved. See [release notes](RELEASE_NOTES.md) and the [R01–R20 correction register](docs/AUDIT_CORRECTIONS.md).
+Public prerelease: **`v0.3.0-beta.2`** (Python package/application version `0.3.0b2`). The original `v0.3.0-beta` tag is preserved. See [release notes](RELEASE_NOTES.md) and the [R01–R20 correction register](docs/AUDIT_CORRECTIONS.md).
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -43,7 +43,7 @@ Clone the repository and install in a clean Python virtual environment (Python 3
 
 #### Windows (PowerShell)
 ```powershell
-git clone https://github.com/zgrap/TESS_Anomaly_Survey.git
+git clone https://github.com/zgraper/TESS_Anomaly_Survey.git
 cd TESS_Anomaly_Survey
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -53,7 +53,7 @@ python -m pip install -e ".[test]"
 
 #### Linux & macOS (Bash / Zsh)
 ```bash
-git clone https://github.com/zgrap/TESS_Anomaly_Survey.git
+git clone https://github.com/zgraper/TESS_Anomaly_Survey.git
 cd TESS_Anomaly_Survey
 python3 -m venv .venv
 source .venv/bin/activate
@@ -183,7 +183,7 @@ If you use TESS Anomaly Survey in your research, please cite the software releas
   title        = {TESS Anomaly Survey: Star-Centered Research Workspace and Calibrated Anomaly Detection},
   version      = {0.3.0b2},
   year         = {2026},
-  url          = {https://github.com/zgrap/TESS_Anomaly_Survey},
+  url          = {https://github.com/zgraper/TESS_Anomaly_Survey},
   note         = {Software release candidate; methodology manuscript in author review}
 }
 ```

@@ -21,8 +21,8 @@ dependencies = [
 keywords = ["astronomy", "TESS", "transit", "anomaly detection", "exoplanets"]
 
 [project.urls]
-Homepage = "https://github.com/zgrap/TESS_Anomaly_Survey"
-Repository = "https://github.com/zgrap/TESS_Anomaly_Survey"
+Homepage = "https://github.com/zgraper/TESS_Anomaly_Survey"
+Repository = "https://github.com/zgraper/TESS_Anomaly_Survey"
 
 [project.optional-dependencies]
 plots = ["matplotlib>=3.7"]
